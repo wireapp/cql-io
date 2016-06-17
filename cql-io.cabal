@@ -3,7 +3,7 @@ version:              0.16.0
 synopsis:             Cassandra CQL client.
 stability:            experimental
 license:              MPL-2.0
-license-file:         LICENSE.txt
+license-file:         LICENSE
 author:               Toralf Wittner
 maintainer:           Toralf Wittner <tw@dtex.org>
 copyright:            (C) 2014-2016 Toralf Wittner
@@ -78,7 +78,7 @@ library
     build-depends:
           async              >= 2.0
         , auto-update        >= 0.1
-        , base               >= 4.7
+        , base               >= 4.7   && < 5.0
         , bytestring         >= 0.10
         , containers         >= 0.5
         , cql                >= 3.0
