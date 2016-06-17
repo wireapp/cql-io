@@ -1,6 +1,6 @@
 before_script:
   - apt-get update
-  - apt-get install -y libstdc++-4.9-dev g++
+  - apt-get install -y libstdc++-4.9-dev g++ libssl-dev
   - cabal update
 
 test:7.10:
