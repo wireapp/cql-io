@@ -1,36 +1,34 @@
-= CQL Cassandra driver
+CQL Cassandra driver
+====================
 
-image:https://img.shields.io/badge/license-MPL_2.0-blue.svg["License: MPL-2.0", link="https://www.mozilla.org/MPL/2.0/"]
-image:https://travis-ci.org/twittner/cql-io.svg?branch=develop["Build Status", link="https://travis-ci.org/twittner/cql-io"]
-
-This library uses the http://hackage.haskell.org/package/cql[cql] library
+This library uses the [cql](http://hackage.haskell.org/package/cql) library
 which implements Cassandra's CQL protocol and complements it with the
 neccessary I/O operations. The feature-set includes:
 
-.Node discovery
+*Node discovery*
 
 The driver discovers nodes automatically from a small set of bootstrap nodes.
 
-.Customisable load-balancing policies
+*Customisable load-balancing policies*
 
 In addition to pre-built LB policies such as round-robin, users of this
 library can provide their own policies if desired.
 
-.Support for connection streams
+*Support for connection streams*
 
 Requests can be multiplexed over a few connections.
 
-.Customisable retry settings
+*Customisable retry settings*
 
 Support for default retry settings as well as local overrides per query.
 
-.Prepared queries
+*Prepared queries*
 
 Prepared queries are an optimisation which parse and prepare a query only
 once on Cassandra nodes but execute it many times with different concrete
 values.
 
-.TLS support
+*TLS support*
 
 Client to node communication can optionally use transport layer security
 (using HsOpenSSL).

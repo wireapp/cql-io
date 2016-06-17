@@ -1,3 +1,7 @@
+0.16.0
+------
+- Update Cabal settings to allow `cql` >= 3.1
+
 0.15.2
 ------
 - Update `async` dependency
