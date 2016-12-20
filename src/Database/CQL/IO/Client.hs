@@ -309,7 +309,7 @@ executeWithPrepare h q = do
     f <- selectAction h
     r <- mkRequest f q
     case snd r of
-        RsError _ (Unprepared _ i) -> do
+        RsError _ _ (Unprepared _ i) -> do
             pq <- preparedQueries
             qs <- atomically' (PQ.lookupQueryString (QueryId i) pq)
             case qs of
@@ -317,7 +317,7 @@ executeWithPrepare h q = do
                 Just  s -> do
                     (g, _) <- prepare (Just LazyPrepare) (s :: Raw QueryString)
                     executeWithPrepare (Just g) q
-        RsError _ e -> throwM e
+        RsError _ _ e -> throwM e
         x           -> return x
   where
     selectAction Nothing  = view policy >>= liftIO . hostCount >>= return . requestN
@@ -332,9 +332,9 @@ prepare (Just LazyPrepare) qs = do
     n <- liftIO $ hostCount (s^.policy)
     (h, r) <- mkRequest (requestN n) (RqPrepare (Prepare qs))
     case r of
-        RsResult _ (PreparedResult i _ _) -> return (h, i)
-        RsError  _ e                      -> throwM e
-        _                                 -> throwM UnexpectedResponse
+        RsResult _ _ (PreparedResult i _ _) -> return (h, i)
+        RsError  _ _ e                      -> throwM e
+        _                                   -> throwM UnexpectedResponse
 prepare (Just EagerPrepare) qs = view policy
     >>= liftIO . current
     >>= mapM (action (RqPrepare (Prepare qs)))
@@ -343,9 +343,9 @@ prepare (Just EagerPrepare) qs = view policy
     action rq h = do
         r <- mkRequest (request1 h) rq
         case snd r of
-            RsResult _ (PreparedResult i _ _) -> return (h, i)
-            RsError  _ e                      -> throwM e
-            _                                 -> throwM UnexpectedResponse
+            RsResult _ _ (PreparedResult i _ _) -> return (h, i)
+            RsError  _ _ e                      -> throwM e
+            _                                   -> throwM UnexpectedResponse
     first (x:_) = return x
     first []    = throwM NoHostAvailable
 prepare Nothing qs = do

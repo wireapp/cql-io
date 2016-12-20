@@ -1,5 +1,5 @@
 name:                 cql-io
-version:              0.16.0
+version:              0.17.0
 synopsis:             Cassandra CQL client.
 stability:            experimental
 license:              MPL-2.0
@@ -17,7 +17,7 @@ extra-source-files:   README.md
                       AUTHORS
 
 description:
-    CQL Cassandra driver supporting native protocol versions 2 and 3.
+    CQL Cassandra driver supporting native protocol versions 2, 3 and 4.
     .
     This library uses the <http://hackage.haskell.org/package/cql cql> library
     which implements Cassandra's CQL protocol and complements it with the
@@ -81,7 +81,7 @@ library
         , base               >= 4.7   && < 5.0
         , bytestring         >= 0.10
         , containers         >= 0.5
-        , cql                >= 3.0
+        , cql                >= 4.0
         , cryptohash         >= 0.11
         , data-default-class
         , exceptions         >= 0.4

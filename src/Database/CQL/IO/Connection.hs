@@ -169,8 +169,8 @@ readLoop v g set tck i sck syn s sref wlck =
         case fromStreamId $ streamId (fst x) of
             -1 ->
                 case parse (set^.compression) x :: Raw Response of
-                    RsError _ e -> throwM e
-                    RsEvent _ e -> emit s e
+                    RsError _ _ e -> throwM e
+                    RsEvent _ _ e -> emit s e
                     r           -> throwM (UnexpectedResponse' r)
             sid -> do
                 ok <- Sync.put x (syn ! sid)
@@ -222,7 +222,7 @@ request c f = send >>= receive
 
 readSocket :: Version -> Logger -> InetAddr -> Socket -> Int -> IO (Header, ByteString)
 readSocket v g i s n = do
-    b <- Socket.recv n i s (if v == V3 then 9 else 8)
+    b <- Socket.recv n i s (if v == V3 || v == V4 then 9 else 8)
     h <- case header v b of
             Left  e -> throwM $ InternalError ("response header reading: " ++ e)
             Right h -> return h
@@ -254,7 +254,7 @@ register c e f = liftIO $ do
     let enc = serialise (c^.protocol) (c^.settings.compression) req
     res <- request c enc
     case parse (c^.settings.compression) res :: Raw Response of
-        RsReady _ Ready -> c^.eventSig |-> f
+        RsReady _ _ Ready -> c^.eventSig |-> f
         other           -> throwM (UnexpectedResponse' other)
 
 validateSettings :: MonadIO m => Connection -> m ()
@@ -269,18 +269,18 @@ supportedOptions c = liftIO $ do
     let options = RqOptions Options :: Raw Request
     res <- request c (serialise (c^.protocol) noCompression options)
     case parse noCompression res :: Raw Response of
-        RsSupported _ x -> return x
+        RsSupported _ _ x -> return x
         other           -> throwM (UnexpectedResponse' other)
 
 useKeyspace :: MonadIO m => Connection -> Keyspace -> m ()
 useKeyspace c ks = liftIO $ do
     let cmp    = c^.settings.compression
-        params = QueryParams One False () Nothing Nothing Nothing
+        params = QueryParams One False () Nothing Nothing Nothing Nothing
         kspace = quoted (fromStrict $ unKeyspace ks)
         req    = RqQuery (Query (QueryString $ "use " <> kspace) params)
     res <- request c (serialise (c^.protocol) cmp req)
     case parse cmp res :: Raw Response of
-        RsResult _ (SetKeyspaceResult _) -> return ()
+        RsResult _ _ (SetKeyspaceResult _) -> return ()
         other                            -> throwM (UnexpectedResponse' other)
 
 query :: forall k a b m. (Tuple a, Tuple b, Show b, MonadIO m)
@@ -294,10 +294,10 @@ query c cons q p = liftIO $ do
     let enc = serialise (c^.protocol) (c^.settings.compression) req
     res <- request c enc
     case parse (c^.settings.compression) res :: Response k a b of
-        RsResult _ (RowsResult _ b) -> return b
+        RsResult _ _ (RowsResult _ b) -> return b
         other                       -> throwM (UnexpectedResponse' other)
   where
-    params = QueryParams cons False p Nothing Nothing Nothing
+    params = QueryParams cons False p Nothing Nothing Nothing Nothing
 
 -- logging helpers:
 

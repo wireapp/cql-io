@@ -38,9 +38,9 @@ batch m = do
     b <- execStateT (unBatchM m) s
     checkRs =<< executeWithPrepare Nothing (RqBatch b :: Raw Request)
   where
-    checkRs (RsResult _ VoidResult) = return ()
-    checkRs (RsError  _ e)          = throwM e
-    checkRs _                       = throwM UnexpectedResponse
+    checkRs (RsResult _ _ VoidResult) = return ()
+    checkRs (RsError  _ _ e)          = throwM e
+    checkRs _                         = throwM UnexpectedResponse
 
     s = Batch BatchLogged [] Quorum Nothing
 

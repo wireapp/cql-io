@@ -178,8 +178,8 @@ instance RunQ QueryString where
     runQ q p = do
         r <- request (RqQuery (Query q p))
         case r of
-            RsError _ e -> throwM e
-            _           -> return r
+            RsError _ _ e -> throwM e
+            _             -> return r
 
 instance RunQ PrepQuery where
     runQ q = liftClient . execute q
@@ -189,8 +189,8 @@ query :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -
 query q p = do
     r <- runQ q p
     case r of
-        RsResult _ (RowsResult _ b) -> return b
-        _                           -> throwM UnexpectedResponse
+        RsResult _ _ (RowsResult _ b) -> return b
+        _                             -> throwM UnexpectedResponse
 
 -- | Run a CQL read-only query against a Cassandra node.
 query1 :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m (Maybe b)
@@ -205,17 +205,17 @@ trans :: (MonadClient m, Tuple a, RunQ q) => q W a Row -> QueryParams a -> m [Ro
 trans q p = do
     r <- runQ q p
     case r of
-        RsResult _ (RowsResult _ b) -> return b
-        _                           -> throwM UnexpectedResponse
+        RsResult _ _ (RowsResult _ b) -> return b
+        _                             -> throwM UnexpectedResponse
 
 -- | Run a CQL schema query against a Cassandra node.
 schema :: (MonadClient m, Tuple a, RunQ q) => q S a () -> QueryParams a -> m (Maybe SchemaChange)
 schema x y = do
     r <- runQ x y
     case r of
-        RsResult _ (SchemaChangeResult s) -> return $ Just s
-        RsResult _ VoidResult             -> return Nothing
-        _                                 -> throwM UnexpectedResponse
+        RsResult _ _ (SchemaChangeResult s) -> return $ Just s
+        RsResult _ _ VoidResult             -> return Nothing
+        _                                   -> throwM UnexpectedResponse
 
 -- | Run a batch query against a Cassandra node.
 batch :: MonadClient m => BatchM () -> m ()
@@ -248,7 +248,7 @@ paginate q p = do
     let p' = p { pageSize = pageSize p <|> Just 10000 }
     r <- runQ q p'
     case r of
-        RsResult _ (RowsResult m b) ->
+        RsResult _ _ (RowsResult m b) ->
             if isJust (pagingState m) then
                 return $ Page True b (paginate q p' { queryPagingState = pagingState m })
             else
