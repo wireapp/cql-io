@@ -86,6 +86,7 @@ import qualified Database.CQL.IO.Connection as C
 import qualified Database.CQL.IO.Jobs       as Jobs
 import qualified Database.CQL.IO.PrepQuery  as PQ
 import qualified Database.CQL.IO.Timeouts   as TM
+import qualified Database.CQL.Protocol      as Cql
 import qualified System.Logger              as Logger
 
 data ControlState
@@ -282,7 +283,12 @@ request1 :: (Tuple a, Tuple b) => Host -> Request k a b -> ClientState -> Client
 request1 h a s = do
     p <- Map.lookup h <$> readTVarIO' (s^.hostmap)
     case p of
-        Just  x -> with x transaction `catches` handlers
+        Just x -> do
+            result <- with x transaction `catches` handlers
+            for_ result $ \(_, r) ->
+                for_ (Cql.warnings r) $ \w ->
+                    warn $ msg (val "server warning: " +++ w)
+            return result
         Nothing -> do
             err $ msg (val "no pool for host " +++ h)
             p' <- mkPool (s^.context) (h^.hostAddr)
