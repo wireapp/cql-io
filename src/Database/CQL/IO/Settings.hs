@@ -153,11 +153,9 @@ setCompression v = set (connSettings.compression) v
 -- binary protocol at most 128 streams can be used. Version 3 supports up
 -- to 32768 streams.
 setMaxStreams :: Int -> Settings -> Settings
-setMaxStreams v s = case s^.protoVersion of
-    V2 | v < 1 || v > 128   -> error "cql-io settings: max. streams must be within [1, 128]"
-    V3 | v < 1 || v > 32768 -> error "cql-io settings: max. streams must be within [1, 32768]"
-    V4 | v < 1 || v > 32768 -> error "cql-io settings: max. streams must be within [1, 32768]"
-    _                       -> set (connSettings.maxStreams) v s
+setMaxStreams v s
+    | v < 1 || v > 32768 = error "cql-io settings: max. streams must be within [1, 32768]"
+    | otherwise          = set (connSettings.maxStreams) v s
 
 -- | Set the connect timeout of a connection.
 setConnectTimeout :: NominalDiffTime -> Settings -> Settings

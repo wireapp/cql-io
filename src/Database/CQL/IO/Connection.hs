@@ -222,7 +222,7 @@ request c f = send >>= receive
 
 readSocket :: Version -> Logger -> InetAddr -> Socket -> Int -> IO (Header, ByteString)
 readSocket v g i s n = do
-    b <- Socket.recv n i s (if v == V3 || v == V4 then 9 else 8)
+    b <- Socket.recv n i s 9
     h <- case header v b of
             Left  e -> throwM $ InternalError ("response header reading: " ++ e)
             Right h -> return h
