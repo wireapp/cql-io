@@ -17,7 +17,7 @@ extra-source-files:   README.md
                       AUTHORS
 
 description:
-    CQL Cassandra driver supporting native protocol versions 2, 3 and 4.
+    CQL Cassandra driver supporting native protocol versions 3 and 4.
     .
     This library uses the <http://hackage.haskell.org/package/cql cql> library
     which implements Cassandra's CQL protocol and complements it with the

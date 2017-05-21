@@ -1,6 +1,7 @@
 0.17.0
 ------
-- Add support for CQL V4 binary protocol. Restricted `cql` >= 4.0
+- Add support for CQL V4 binary protocol.
+- Remove support for CQL V2 binary protocol.
 
 0.16.0
 ------
