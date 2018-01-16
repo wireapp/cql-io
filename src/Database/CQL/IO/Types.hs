@@ -156,6 +156,24 @@ instance Show HashCollision where
                              . shows b
                              $ ""
 
+-----------------------------------------------------------------------------
+-- AuthenticationError
+
+data AuthenticationError = AuthenticationMechanismUnsupported !Text
+                         | AuthenticationRequired
+                         | AuthenticationIgnored
+
+instance Exception AuthenticationError
+
+instance Show AuthenticationError where
+    show (AuthenticationMechanismUnsupported m) =
+        "cql-io: server requested unsupported authentication mechanism "
+        ++ show m
+    show AuthenticationRequired =
+        "cql-io: authentication required, none provided"
+    show AuthenticationIgnored =
+        "cql-io: authentication provided in settings but not requested"
+
 ignore :: IO () -> IO ()
 ignore a = catchAll a (const $ return ())
 {-# INLINE ignore #-}

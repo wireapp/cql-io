@@ -56,9 +56,11 @@
 module Database.CQL.IO
     ( -- * Client settings
       Settings
+    , Authentication (..)
     , PrepareStrategy (..)
     , defSettings
     , addContact
+    , setAuthentication
     , setCompression
     , setConnectTimeout
     , setContacts

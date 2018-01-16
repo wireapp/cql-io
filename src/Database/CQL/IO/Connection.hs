@@ -14,6 +14,7 @@ module Database.CQL.IO.Connection
     , close
     , request
     , startup
+    , authResponse
     , register
     , query
     , useKeyspace
@@ -240,13 +241,32 @@ readSocket v g i s n = do
 -----------------------------------------------------------------------------
 -- Operations
 
-startup :: MonadIO m => Connection -> m ()
+startup :: MonadIO m => Connection -> m (Either Authenticate Ready)
 startup c = liftIO $ do
     let cmp = c^.settings.compression
     let req = RqStartup (Startup Cqlv300 (algorithm cmp))
     let enc = serialise (c^.protocol) cmp (req :: Raw Request)
     res <- request c enc
-    (parse cmp res :: Raw Response) `seq` return ()
+    case parse cmp res :: Raw Response of
+        RsReady _ _ Ready       -> return $ Right Ready
+        RsAuthenticate _ _ auth -> return $ Left auth
+        RsError _ _ e           -> throwM e
+        other                   -> throwM $ UnexpectedResponse' other
+
+authResponse :: MonadIO m
+             => Connection
+             -> AuthResponse
+             -> m (Either AuthChallenge AuthSuccess)
+authResponse c resp = liftIO $ do
+    let cmp = c^.settings.compression
+    let req = RqAuthResp resp
+    let enc = serialise (c^.protocol) cmp (req :: Raw Request)
+    res <- request c enc
+    case parse cmp res :: Raw Response of
+        RsAuthSuccess _ _ success     -> return $ Right success
+        RsAuthChallenge _ _ challenge -> return $ Left challenge
+        RsError _ _ e                 -> throwM e
+        other                         -> throwM $ UnexpectedResponse' other
 
 register :: MonadIO m => Connection -> [EventType] -> EventHandler -> m ()
 register c e f = liftIO $ do

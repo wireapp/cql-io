@@ -39,9 +39,9 @@ import Control.Applicative
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (async, wait)
 import Control.Concurrent.STM hiding (retry)
-import Control.Exception (IOException)
+import Control.Exception (IOException, throwIO)
 import Control.Lens hiding ((.=), Context)
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.Base (MonadBase (..))
 import Control.Monad.Catch
 import Control.Monad.IO.Class
@@ -58,6 +58,7 @@ import Data.List.NonEmpty (NonEmpty (..))
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
+import Data.Text.Lazy (fromStrict)
 import Data.Word
 import Database.CQL.IO.Cluster.Discovery as Discovery
 import Database.CQL.IO.Cluster.Host
@@ -80,6 +81,7 @@ import Prelude
 import qualified Control.Monad.Reader       as Reader
 import qualified Control.Monad.State.Strict as S
 import qualified Control.Monad.State.Lazy   as LS
+import qualified Data.ByteString.Lazy.Char8 as Char8
 import qualified Data.List.NonEmpty         as NE
 import qualified Data.Map.Strict            as Map
 import qualified Database.CQL.IO.Connection as C
@@ -428,10 +430,10 @@ init g s = liftIO $ do
 
 initialise :: Connection -> Client ()
 initialise c = do
-    startup c
     env <- ask
     pol <- view policy
     ctx <- view context
+    startupAndAuthenticate ctx c
     l <- local2Host (c^.address) . listToMaybe <$> query c One Discovery.local ()
     r <- discoverPeers ctx c
     (u, d) <- mkHostMap ctx pol (l:r)
@@ -444,6 +446,23 @@ initialise c = do
     j <- view jobs
     for_ (Map.keys d) $ \down ->
         Jobs.add j (down^.hostAddr) True $ monitor ctx 1000000 60000000 down
+
+startupAndAuthenticate :: MonadIO m => Context -> Connection -> m ()
+startupAndAuthenticate ctx c =
+    startup c >>= either (authenticate ctx c) (const assertNoAuth)
+
+    where assertNoAuth = unless (ctx^.settings.authentication == Nothing)
+                                (liftIO $ throwIO AuthenticationIgnored)
+
+authenticate :: MonadIO m => Context -> Connection -> Authenticate -> m ()
+authenticate ctx c (Authenticate "org.apache.cassandra.auth.PasswordAuthenticator") =
+    case ctx^.settings.authentication of
+         Just (PasswordAuthentication user pass) ->
+             void $ authResponse c (AuthResponse $ Char8.concat ["\0",user,"\0",pass])
+         Nothing ->
+             liftIO $ throwIO AuthenticationRequired
+authenticate _ _ (Authenticate m) =
+    liftIO $ throwIO $ AuthenticationMechanismUnsupported $ fromStrict m
 
 discoverPeers :: MonadIO m => Context -> Connection -> m [Host]
 discoverPeers ctx c = liftIO $ do
@@ -480,7 +499,7 @@ mkPool ctx i = liftIO $ do
         return c
 
     connInit con = do
-        C.startup con
+        startupAndAuthenticate ctx con
         for_ (ctx^.settings.connSettings.defKeyspace) $
             C.useKeyspace con
 
