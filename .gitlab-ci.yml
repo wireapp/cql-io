@@ -6,7 +6,6 @@ cache:
   key: "$CI_JOB_NAME"
   paths:
     - .stack
-    - .stack-work
 
 services:
   - cassandra:3.11.2
@@ -15,14 +14,15 @@ before_script:
   - apt -qq update
   - apt -qq install xz-utils make libstdc++-4.9-dev g++ libssl-dev > /dev/null
   - stack upgrade && hash -d stack && stack --version
+  - stack clean --full
 
 test:8.2:
   image: haskell:8.2
   script:
-    - stack test --fast
+    - stack -j 1 test --fast
 
 test:8.0:
   image: haskell:8.0
   script:
-    - stack --resolver lts-9.21 test --fast
+    - stack -j 1 --resolver lts-9.21 test --fast
 
