@@ -17,6 +17,7 @@ import Data.Time
 import Data.UUID
 import Database.CQL.Protocol
 import Database.CQL.IO as Client
+import System.Environment
 import Test.Tasty
 import Test.Tasty.HUnit
 import Text.RawString.QQ
@@ -25,8 +26,9 @@ import qualified System.Logger as Logger
 
 main :: IO ()
 main = do
+    h <- fromMaybe "localhost" <$> lookupEnv "CASSANDRA_HOST"
     g <- Logger.new Logger.defSettings
-    c <- Client.init g defSettings
+    c <- Client.init g (setContacts h [] defSettings)
     defaultMain $ testGroup "cql-io tests"
         [ testCase "keyspace" (runClient c createKeyspace)
         , testCase "table" (runClient c createTable)
