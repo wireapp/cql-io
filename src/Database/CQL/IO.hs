@@ -56,11 +56,8 @@
 module Database.CQL.IO
     ( -- * Client settings
       Settings
-    , Authentication (..)
-    , PrepareStrategy (..)
-    , defSettings
+    , S.defSettings
     , addContact
-    , setAuthentication
     , setCompression
     , setConnectTimeout
     , setContacts
@@ -72,6 +69,7 @@ module Database.CQL.IO
     , setPolicy
     , setPoolStripes
     , setPortNumber
+    , PrepareStrategy (..)
     , setPrepareStrategy
     , setProtocolVersion
     , setResponseTimeout
@@ -79,6 +77,13 @@ module Database.CQL.IO
     , setRetrySettings
     , setMaxRecvBuffer
     , setSSLContext
+
+      -- ** Authentication
+    , Authenticator (..)
+    , AuthUser (..)
+    , AuthPass (..)
+    , passwordAuthenticator
+    , setAuthenticator
 
       -- ** Retry Settings
     , RetrySettings
@@ -165,8 +170,9 @@ import Database.CQL.IO.Batch hiding (batch)
 import Database.CQL.IO.Client
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
+import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.PrepQuery
-import Database.CQL.IO.Settings
+import Database.CQL.IO.Settings as S
 import Database.CQL.IO.Types
 import Prelude hiding (init)
 

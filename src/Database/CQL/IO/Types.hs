@@ -15,7 +15,7 @@ import Control.Monad.Catch
 import Data.IP
 import Data.Text.Lazy (Text)
 import Data.Typeable
-import Database.CQL.Protocol (Event, Response, CompressionAlgorithm)
+import Database.CQL.Protocol
 import Network.Socket (SockAddr (..), PortNumber)
 import System.Logger.Message
 
@@ -159,20 +159,15 @@ instance Show HashCollision where
 -----------------------------------------------------------------------------
 -- AuthenticationError
 
-data AuthenticationError = AuthenticationMechanismUnsupported !Text
-                         | AuthenticationRequired
-                         | AuthenticationIgnored
+data AuthenticationRequired = AuthenticationRequired !Authenticate
 
-instance Exception AuthenticationError
+instance Exception AuthenticationRequired
 
-instance Show AuthenticationError where
-    show (AuthenticationMechanismUnsupported m) =
-        "cql-io: server requested unsupported authentication mechanism "
-        ++ show m
-    show AuthenticationRequired =
-        "cql-io: authentication required, none provided"
-    show AuthenticationIgnored =
-        "cql-io: authentication provided in settings but not requested"
+instance Show AuthenticationRequired where
+    show (AuthenticationRequired a)
+        = showString "cql-io: authentication required: "
+        . shows a
+        $ ""
 
 ignore :: IO () -> IO ()
 ignore a = catchAll a (const $ return ())

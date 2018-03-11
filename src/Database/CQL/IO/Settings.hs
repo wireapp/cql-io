@@ -15,16 +15,13 @@ import Data.Monoid
 import Data.Time
 import Data.Word
 import Database.CQL.Protocol
-import Database.CQL.IO.Connection
 import Database.CQL.IO.Cluster.Policies (Policy, random)
-import Database.CQL.IO.Connection as C
+import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.Pool as P
 import Database.CQL.IO.Types (Milliseconds (..))
 import Network.Socket (PortNumber (..))
 import OpenSSL.Session (SSLContext)
 import Prelude
-
-import qualified Data.ByteString.Lazy.Char8 as Char8
 
 data PrepareStrategy
     = EagerPrepare -- ^ cluster-wide preparation
@@ -39,25 +36,18 @@ data RetrySettings = RetrySettings
     }
 
 data Settings = Settings
-    { _poolSettings   :: !PoolSettings
-    , _connSettings   :: !ConnectionSettings
-    , _retrySettings  :: !RetrySettings
-    , _protoVersion   :: !Version
-    , _portnumber     :: !PortNumber
-    , _contacts       :: !(NonEmpty String)
-    , _policyMaker    :: !(IO Policy)
-    , _prepStrategy   :: !PrepareStrategy
-    , _authentication :: !(Maybe Authentication)
+    { _poolSettings  :: !PoolSettings
+    , _connSettings  :: !ConnectionSettings
+    , _retrySettings :: !RetrySettings
+    , _protoVersion  :: !Version
+    , _portnumber    :: !PortNumber
+    , _contacts      :: !(NonEmpty String)
+    , _policyMaker   :: !(IO Policy)
+    , _prepStrategy  :: !PrepareStrategy
     }
-
-data Authentication = PasswordAuthentication
-    { _username :: Char8.ByteString
-    , _password :: Char8.ByteString
-    } deriving (Eq)
 
 makeLenses ''RetrySettings
 makeLenses ''Settings
-makeLenses ''Authentication
 
 -- | Default settings:
 --
@@ -95,7 +85,6 @@ defSettings = Settings
     ("localhost" :| [])
     random
     LazyPrepare
-    Nothing -- no authentication by default
 
 -----------------------------------------------------------------------------
 -- Settings
@@ -124,10 +113,6 @@ setPolicy v = set policyMaker v
 -- | Set strategy to use for preparing statements.
 setPrepareStrategy :: PrepareStrategy -> Settings -> Settings
 setPrepareStrategy v = set prepStrategy v
-
--- | Set authentication to use.
-setAuthentication :: Authentication -> Settings -> Settings
-setAuthentication v = set authentication $ Just v
 
 -----------------------------------------------------------------------------
 -- Pool Settings
@@ -207,6 +192,10 @@ setMaxRecvBuffer v = set (connSettings.maxRecvBuffer) v
 -- This will make client server queries use TLS.
 setSSLContext :: SSLContext -> Settings -> Settings
 setSSLContext v = set (connSettings.tlsContext) (Just v)
+
+-- | Set authenticator to use.
+setAuthenticator :: C.Authenticator -> Settings -> Settings
+setAuthenticator v = set (connSettings.authenticator) (Just v)
 
 -----------------------------------------------------------------------------
 -- Retry Settings

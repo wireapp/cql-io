@@ -2,6 +2,7 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
@@ -14,24 +15,12 @@ module Database.CQL.IO.Connection
     , close
     , request
     , startup
-    , authResponse
     , register
     , query
     , useKeyspace
     , address
     , protocol
     , eventSig
-
-    , ConnectionSettings
-    , defSettings
-    , connectTimeout
-    , sendTimeout
-    , responseTimeout
-    , maxStreams
-    , compression
-    , defKeyspace
-    , maxRecvBuffer
-    , tlsContext
     ) where
 
 import Control.Applicative
@@ -53,6 +42,7 @@ import Data.Unique
 import Data.Vector (Vector, (!))
 import Database.CQL.Protocol
 import Database.CQL.IO.Connection.Socket (Socket)
+import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Hexdump
 import Database.CQL.IO.Protocol
 import Database.CQL.IO.Signal hiding (connect)
@@ -61,7 +51,6 @@ import Database.CQL.IO.Types
 import Database.CQL.IO.Tickets (Pool, toInt, markAvailable)
 import Database.CQL.IO.Timeouts (TimeoutManager, withTimeout)
 import Network.Socket hiding (Socket, close, connect, send)
-import OpenSSL.Session (SSLContext)
 import System.IO (nativeNewline, Newline (..))
 import System.Logger hiding (Settings, close, defSettings, settings)
 import System.Timeout
@@ -74,17 +63,6 @@ import qualified Database.CQL.IO.Connection.Socket as Socket
 import qualified Database.CQL.IO.Sync              as Sync
 import qualified Database.CQL.IO.Tickets           as Tickets
 import qualified Network.Socket                    as S
-
-data ConnectionSettings = ConnectionSettings
-    { _connectTimeout  :: !Milliseconds
-    , _sendTimeout     :: !Milliseconds
-    , _responseTimeout :: !Milliseconds
-    , _maxStreams      :: !Int
-    , _compression     :: !Compression
-    , _defKeyspace     :: !(Maybe Keyspace)
-    , _maxRecvBuffer   :: !Int
-    , _tlsContext      :: !(Maybe SSLContext)
-    }
 
 type Streams = Vector (Sync (Header, ByteString))
 
@@ -104,7 +82,6 @@ data Connection = Connection
     , _ident    :: !Unique
     }
 
-makeLenses ''ConnectionSettings
 makeLenses ''Connection
 
 instance Eq Connection where
@@ -115,17 +92,6 @@ instance Show Connection where
 
 instance ToBytes Connection where
     bytes c = bytes (c^.address) +++ val "#" +++ c^.sock
-
-defSettings :: ConnectionSettings
-defSettings =
-    ConnectionSettings 5000          -- connect timeout
-                       3000          -- send timeout
-                       10000         -- response timeout
-                       128           -- max streams per connection
-                       noCompression -- compression
-                       Nothing       -- keyspace
-                       16384         -- receive buffer size
-                       Nothing       -- no tls by default
 
 resolve :: String -> PortNumber -> IO [InetAddr]
 resolve host port =
@@ -241,17 +207,27 @@ readSocket v g i s n = do
 -----------------------------------------------------------------------------
 -- Operations
 
-startup :: MonadIO m => Connection -> m (Either Authenticate Ready)
+startup :: MonadIO m => Connection -> m ()
 startup c = liftIO $ do
     let cmp = c^.settings.compression
     let req = RqStartup (Startup Cqlv300 (algorithm cmp))
     let enc = serialise (c^.protocol) cmp (req :: Raw Request)
     res <- request c enc
     case parse cmp res :: Raw Response of
-        RsReady _ _ Ready       -> return $ Right Ready
-        RsAuthenticate _ _ auth -> return $ Left auth
+        RsReady _ _ Ready       -> return ()
+        RsAuthenticate _ _ auth -> authenticate c auth
         RsError _ _ e           -> throwM e
         other                   -> throwM $ UnexpectedResponse' other
+
+authenticate :: (MonadIO m, MonadThrow m) => Connection -> Authenticate -> m ()
+authenticate c auth = case c^.settings.authenticator of
+    Nothing -> throwM (AuthenticationRequired auth)
+    Just  a -> liftIO $ (a^.authOnRequest) auth >>= react a
+  where
+    react _ Nothing   = throwM (AuthenticationRequired auth)
+    react a (Just rs) = authResponse c rs >>= \case
+        Left  l -> (a^.authOnChallenge) l >>= react a
+        Right s -> (a^.authOnSuccess  ) s
 
 authResponse :: MonadIO m
              => Connection
