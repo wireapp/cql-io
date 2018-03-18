@@ -23,6 +23,8 @@ import Network.Socket (PortNumber (..))
 import OpenSSL.Session (SSLContext)
 import Prelude
 
+import qualified Data.HashMap.Strict as HashMap
+
 data PrepareStrategy
     = EagerPrepare -- ^ cluster-wide preparation
     | LazyPrepare  -- ^ on-demand per node preparation
@@ -193,9 +195,16 @@ setMaxRecvBuffer v = set (connSettings.maxRecvBuffer) v
 setSSLContext :: SSLContext -> Settings -> Settings
 setSSLContext v = set (connSettings.tlsContext) (Just v)
 
--- | Set authenticator to use.
-setAuthenticator :: C.Authenticator -> Settings -> Settings
-setAuthenticator v = set (connSettings.authenticator) (Just v)
+-- | Set the supported authentication mechanisms.
+--
+-- When a Cassandra server requests authentication on a connection,
+-- it specifies the requested 'AuthMechanism'. The client 'Authenticator'
+-- is chosen based that name. If no authenticator with a matching
+-- name is configured, an 'AuthenticationError' is thrown.
+setAuthentication :: [C.Authenticator] -> Settings -> Settings
+setAuthentication = set (connSettings.authenticators)
+                  . HashMap.fromList
+                  . map (\a -> (authMechanism a, a))
 
 -----------------------------------------------------------------------------
 -- Retry Settings

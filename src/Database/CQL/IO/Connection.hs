@@ -6,9 +6,11 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 module Database.CQL.IO.Connection
     ( Connection
+    , ConnId
     , resolve
     , ping
     , connect
@@ -58,6 +60,7 @@ import Prelude
 
 import qualified Data.ByteString.Lazy              as L
 import qualified Data.ByteString.Lazy.Char8        as Char8
+import qualified Data.HashMap.Strict               as HashMap
 import qualified Data.Vector                       as Vector
 import qualified Database.CQL.IO.Connection.Socket as Socket
 import qualified Database.CQL.IO.Sync              as Sync
@@ -79,7 +82,7 @@ data Connection = Connection
     , _tickets  :: !Pool
     , _logger   :: !Logger
     , _eventSig :: !(Signal Event)
-    , _ident    :: !Unique
+    , _ident    :: !ConnId
     }
 
 makeLenses ''Connection
@@ -108,7 +111,7 @@ connect t m v g a = liftIO $ do
         sta <- newTVarIO True
         sig <- signal
         rdr <- async (readLoop v g t tck a s syn sig sta lck)
-        Connection t a m v s sta syn lck rdr tck g sig <$> newUnique
+        Connection t a m v s sta syn lck rdr tck g sig . ConnId <$> newUnique
     validateSettings c `onException` close c
     return c
 
@@ -183,7 +186,7 @@ request c f = send >>= receive
         let e = TimeoutRead (show c ++ ":" ++ show i)
         tid <- myThreadId
         withTimeout (c^.tmanager) (c^.settings.responseTimeout) (throwTo tid e) $ do
-            x <- Sync.get (view streams c ! i) `onException` (Sync.kill e) (view streams c ! i)
+            x <- Sync.get (view streams c ! i) `onException` Sync.kill e (view streams c ! i)
             markAvailable (c^.tickets) i
             return x
 
@@ -214,20 +217,38 @@ startup c = liftIO $ do
     let enc = serialise (c^.protocol) cmp (req :: Raw Request)
     res <- request c enc
     case parse cmp res :: Raw Response of
-        RsReady _ _ Ready       -> return ()
+        RsReady _ _ Ready       -> checkAuth c
         RsAuthenticate _ _ auth -> authenticate c auth
         RsError _ _ e           -> throwM e
         other                   -> throwM $ UnexpectedResponse' other
 
+checkAuth :: Connection -> IO ()
+checkAuth c = unless (null (c^.settings.authenticators)) $
+    warn (_logger c) $ msg $ val
+        "Authentication configured but none required by server."
+
 authenticate :: (MonadIO m, MonadThrow m) => Connection -> Authenticate -> m ()
-authenticate c auth = case c^.settings.authenticator of
-    Nothing -> throwM (AuthenticationRequired auth)
-    Just  a -> liftIO $ (a^.authOnRequest) auth >>= react a
+authenticate c (Authenticate (AuthMechanism -> m)) =
+    case HashMap.lookup m (c^.settings.authenticators) of
+        Nothing -> throwM $ AuthenticationRequired m
+        Just Authenticator {
+            authOnRequest   = onR
+          , authOnChallenge = onC
+          , authOnSuccess   = onS
+        } -> liftIO $ do
+            (rs, s) <- onR context
+            case onC of
+                Just  f -> loop f onS (rs, s)
+                Nothing -> authResponse c rs >>= either
+                    (throwM . UnmetAuthenticationChallenge m)
+                    (onS s)
   where
-    react _ Nothing   = throwM (AuthenticationRequired auth)
-    react a (Just rs) = authResponse c rs >>= \case
-        Left  l -> (a^.authOnChallenge) l >>= react a
-        Right s -> (a^.authOnSuccess  ) s
+    context = AuthContext (c^.ident) (c^.address)
+
+    loop onC onS (rs, s) =
+        authResponse c rs >>= either
+            (onC s >=> loop onC onS)
+            (onS s)
 
 authResponse :: MonadIO m
              => Connection

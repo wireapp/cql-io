@@ -2,10 +2,11 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE ExistentialQuantification  #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TemplateHaskell            #-}
 
 module Database.CQL.IO.Connection.Settings
     ( ConnectionSettings
@@ -18,13 +19,14 @@ module Database.CQL.IO.Connection.Settings
     , defKeyspace
     , maxRecvBuffer
     , tlsContext
-    , authenticator
+    , authenticators
 
       -- * Authentication
+    , AuthMechanism (..)
     , Authenticator (..)
-    , authOnRequest
-    , authOnChallenge
-    , authOnSuccess
+    , AuthContext   (..)
+    , authConnId
+    , authHost
     , passwordAuthenticator
     , AuthUser (..)
     , AuthPass (..)
@@ -32,15 +34,17 @@ module Database.CQL.IO.Connection.Settings
 
 import Control.Lens (makeLenses)
 import Control.Monad
+import Data.HashMap.Strict (HashMap)
 import Data.Int
-import Data.Text.Lazy (Text)
-import Data.Text.Lazy.Encoding (encodeUtf8)
 import Database.CQL.Protocol
 import Database.CQL.IO.Types
 import OpenSSL.Session (SSLContext)
 import Prelude
 
 import qualified Data.ByteString.Lazy.Char8 as Char8
+import qualified Data.HashMap.Strict        as HashMap
+import qualified Data.Text.Lazy             as Lazy
+import qualified Data.Text.Lazy.Encoding    as Lazy
 
 data ConnectionSettings = ConnectionSettings
     { _connectTimeout  :: !Milliseconds
@@ -51,26 +55,60 @@ data ConnectionSettings = ConnectionSettings
     , _defKeyspace     :: !(Maybe Keyspace)
     , _maxRecvBuffer   :: !Int
     , _tlsContext      :: !(Maybe SSLContext)
-    , _authenticator   :: !(Maybe Authenticator)
+    , _authenticators  :: !(HashMap AuthMechanism Authenticator)
     }
 
--- | An SASL authentication handler.
+-- | Context information given to 'Authenticator's when
+-- the server requests authentication on a connection.
+-- See 'authOnRequest'.
+data AuthContext = AuthContext
+    { _authConnId :: !ConnId
+    , _authHost   :: !InetAddr
+    }
+
+-- | A client authentication handler.
 --
--- See:
+-- The fields of an 'Authenticator' must implement the client-side
+-- of an (SASL) authentication mechanism as follows:
+--
+--    * When a Cassandra server requests authentication on a new connection,
+--      'authOnRequest' is called with the 'AuthContext' of the
+--      connection.
+--
+--    * If additional challenges are posed by the server,
+--      'authOnChallenge' is called, if available, otherwise an
+--      'AuthenticationError' is thrown, i.e. every challenge must be
+--      answered.
+--
+--    * Upon successful authentication 'authOnSuccess' is called.
+--
+-- The existential type @s@ is chosen by an implementation and can
+-- be used to thread arbitrary state through the sequence of callback
+-- invocations during an authentication exchange.
+--
+-- See also:
 -- <https://tools.ietf.org/html/rfc4422 RFC4422>
--- See:
 -- <https://docs.datastax.com/en/cassandra/latest/cassandra/configuration/secureInternalAuthenticationTOC.html Authentication>
-data Authenticator = Authenticator
-    { _authOnRequest   :: Authenticate  -> IO (Maybe AuthResponse)
-    , _authOnChallenge :: AuthChallenge -> IO (Maybe AuthResponse)
-    , _authOnSuccess   :: AuthSuccess   -> IO ()
+data Authenticator = forall s. Authenticator
+    { authMechanism :: !AuthMechanism
+        -- ^ The (unique) name of the (SASL) mechanism that the callbacks
+        -- implement.
+    , authOnRequest :: AuthContext -> IO (AuthResponse, s)
+        -- ^ Callback for initiating an authentication exchange.
+    , authOnChallenge :: Maybe (s -> AuthChallenge -> IO (AuthResponse, s))
+        -- ^ Optional callback for additional challenges posed by the server.
+        -- If the authentication mechanism does not require additional
+        -- challenges, it should be set to 'Nothing'. Otherwise every
+        -- challenge must be answered with a response.
+    , authOnSuccess :: s -> AuthSuccess -> IO ()
+        -- ^ Callback for successful completion of an authentication exchange.
     }
 
-makeLenses ''Authenticator
+makeLenses ''AuthContext
 makeLenses ''ConnectionSettings
 
-newtype AuthUser = AuthUser Text
-newtype AuthPass = AuthPass Text
+newtype AuthUser = AuthUser Lazy.Text
+newtype AuthPass = AuthPass Lazy.Text
 
 -- | A password authentication handler for use with Cassandra's
 -- @PasswordAuthenticator@.
@@ -78,13 +116,14 @@ newtype AuthPass = AuthPass Text
 -- See: <https://docs.datastax.com/en/cassandra/latest/cassandra/configuration/secureConfigNativeAuth.html Configuring Authentication>
 passwordAuthenticator :: AuthUser -> AuthPass -> Authenticator
 passwordAuthenticator (AuthUser u) (AuthPass p) = Authenticator
-    { _authOnRequest = \case
-        Authenticate "org.apache.cassandra.auth.PasswordAuthenticator" ->
-            let tok = Char8.concat ["\0", encodeUtf8 u, "\0", encodeUtf8 p]
-            in return (Just (AuthResponse tok))
-        _ -> return Nothing
-    , _authOnChallenge = const (return Nothing)
-    , _authOnSuccess   = const (return ())
+    { authMechanism   = "org.apache.cassandra.auth.PasswordAuthenticator"
+    , authOnChallenge = Nothing
+    , authOnSuccess   = \() _ -> return ()
+    , authOnRequest   = \_ctx ->
+        let user = Lazy.encodeUtf8 u
+            pass = Lazy.encodeUtf8 p
+            resp = AuthResponse (Char8.concat ["\0", user, "\0", pass])
+        in return (resp, ())
     }
 
 defSettings :: ConnectionSettings
@@ -97,5 +136,5 @@ defSettings =
                        Nothing       -- keyspace
                        16384         -- receive buffer size
                        Nothing       -- no tls by default
-                       Nothing       -- no authentication
+                       HashMap.empty -- no authentication
 

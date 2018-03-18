@@ -79,11 +79,16 @@ module Database.CQL.IO
     , setSSLContext
 
       -- ** Authentication
+    , setAuthentication
     , Authenticator (..)
-    , AuthUser (..)
-    , AuthPass (..)
+    , AuthContext
+    , ConnId
+    , authConnId
+    , authHost
+    , AuthMechanism (..)
+    , AuthUser      (..)
+    , AuthPass      (..)
     , passwordAuthenticator
-    , setAuthenticator
 
       -- ** Retry Settings
     , RetrySettings
@@ -152,13 +157,14 @@ module Database.CQL.IO
     , rack
 
     -- * Exceptions
-    , InvalidSettings    (..)
-    , InternalError      (..)
-    , HostError          (..)
-    , ConnectionError    (..)
-    , UnexpectedResponse (..)
-    , Timeout            (..)
-    , HashCollision      (..)
+    , InvalidSettings     (..)
+    , InternalError       (..)
+    , HostError           (..)
+    , ConnectionError     (..)
+    , UnexpectedResponse  (..)
+    , Timeout             (..)
+    , HashCollision       (..)
+    , AuthenticationError (..)
     ) where
 
 import Control.Applicative

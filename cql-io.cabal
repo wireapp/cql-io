@@ -102,6 +102,7 @@ library
         , time               >= 1.4
         , transformers       >= 0.3
         , transformers-base  >= 0.4
+        , unordered-containers >= 0.2
         , uuid               >= 1.2.6
         , vector             >= 0.10
 
