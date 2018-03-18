@@ -181,8 +181,8 @@ newtype AuthMechanism = AuthMechanism Text
     deriving (Eq, Ord, Show, IsString, Hashable)
 
 data AuthenticationError
-    = AuthenticationRequired       !AuthMechanism
-    | UnmetAuthenticationChallenge !AuthMechanism !AuthChallenge
+    = AuthenticationRequired !AuthMechanism
+    | UnexpectedAuthenticationChallenge !AuthMechanism !AuthChallenge
 
 instance Exception AuthenticationError
 
@@ -192,8 +192,8 @@ instance Show AuthenticationError where
         . shows a
         $ ""
 
-    show (UnmetAuthenticationChallenge n c)
-        = showString "cql-io: unmet authentication challenge: '"
+    show (UnexpectedAuthenticationChallenge n c)
+        = showString "cql-io: unexpected authentication challenge: '"
         . shows c
         . showString "' using mechanism '"
         . shows n

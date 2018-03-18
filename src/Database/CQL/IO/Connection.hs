@@ -240,7 +240,7 @@ authenticate c (Authenticate (AuthMechanism -> m)) =
             case onC of
                 Just  f -> loop f onS (rs, s)
                 Nothing -> authResponse c rs >>= either
-                    (throwM . UnmetAuthenticationChallenge m)
+                    (throwM . UnexpectedAuthenticationChallenge m)
                     (onS s)
   where
     context = AuthContext (c^.ident) (c^.address)
