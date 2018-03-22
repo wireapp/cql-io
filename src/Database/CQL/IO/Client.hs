@@ -13,6 +13,7 @@
 {-# LANGUAGE TemplateHaskell            #-}
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE UndecidableInstances       #-}
+{-# LANGUAGE ViewPatterns               #-}
 
 module Database.CQL.IO.Client
     ( Client
@@ -63,6 +64,7 @@ import Database.CQL.IO.Cluster.Discovery as Discovery
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
 import Database.CQL.IO.Connection hiding (request)
+import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Jobs (Jobs)
 import Database.CQL.IO.Pool
 import Database.CQL.IO.PrepQuery (PrepQuery, PreparedQueries)
@@ -165,7 +167,7 @@ instance MonadBaseControl IO Client where
 -- | Monads in which 'Client' actions may be embedded.
 class (Functor m, Applicative m, Monad m, MonadIO m, MonadCatch m) => MonadClient m
   where
-    -- | Lift a computation to the 'Client' monad.
+    -- | Lift a computation from the 'Client' monad.
     liftClient :: Client a -> m a
     -- | Execute an action with a modified 'ClientState'.
     localState :: (ClientState -> ClientState) -> m a -> m a
@@ -413,7 +415,7 @@ init g s = liftIO $ do
             <*> newTVarIO Map.empty
             <*> Jobs.new
     e^.sigMonit |-> onEvent p
-    runClient x (initialise c)
+    runClient x (initialise c) `onException` liftIO (C.close c)
     return x
   where
     mkConnection t h = do
@@ -578,7 +580,7 @@ replaceControl a = do
     ctl <- view control
     let s = ctx^.settings
     c <- C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) (ctx^.logger) a
-    initialise c
+    initialise c `onException` liftIO (C.close c)
     atomically' $ writeTVar ctl (Control Connected c)
     info $ msg (val "new control connection: " +++ c)
 
@@ -588,23 +590,21 @@ onCqlEvent x = do
     pol <- view policy
     prt <- view (context.settings.portnumber)
     case x of
-        StatusEvent Down sa -> do
-            liftIO $ onEvent pol $ HostDown (InetAddr $ mapPort prt sa)
-        TopologyEvent RemovedNode sa -> do
-            let a = InetAddr $ mapPort prt sa
+        StatusEvent Down (mapAddr prt -> a) ->
+            liftIO $ onEvent pol (HostDown a)
+        TopologyEvent RemovedNode (mapAddr prt -> a) -> do
             hmap <- view hostmap
             atomically' $
                 modifyTVar' hmap (Map.filterWithKey (\h _ -> h^.hostAddr /= a))
             liftIO $ onEvent pol $ HostGone a
-        StatusEvent Up sa -> do
+        StatusEvent Up (mapAddr prt -> a) -> do
             s <- ask
-            startMonitor s $ (InetAddr $ mapPort prt sa)
-        TopologyEvent NewNode sa -> do
+            startMonitor s a
+        TopologyEvent NewNode (mapAddr prt -> a) -> do
             s <- ask
             let ctx  = s^.context
             let hmap = s^.hostmap
             ctrl <- readTVarIO' (s^.control)
-            let a = InetAddr $ mapPort prt sa
             let c = ctrl^.connection
             h    <- fromMaybe (Host a "" "") . find ((a == ) . view hostAddr) <$> discoverPeers' ctx c
             okay <- liftIO $ acceptable pol h
@@ -615,11 +615,11 @@ onCqlEvent x = do
                 Jobs.add (s^.jobs) a False $ runClient s (prepareAllQueries h)
         SchemaEvent _ -> return ()
   where
-    mapPort i (SockAddrInet _ a)      = SockAddrInet i a
-    mapPort i (SockAddrInet6 _ f a b) = SockAddrInet6 i f a b
-    mapPort _ unix                    = unix
+    mapAddr i (SockAddrInet _ a)      = InetAddr (SockAddrInet i a)
+    mapAddr i (SockAddrInet6 _ f a b) = InetAddr (SockAddrInet6 i f a b)
+    mapAddr _ unix                    = InetAddr unix
 
-    discoverPeers' ctx c = discoverPeers ctx c `catchAll` (const $ return [])
+    discoverPeers' ctx c = discoverPeers ctx c `catchAll` const (return [])
 
     startMonitor s a = do
         hmp <- readTVarIO' (s^.hostmap)
@@ -652,7 +652,7 @@ allEventTypes = [TopologyChangeEvent, StatusChangeEvent, SchemaChangeEvent]
 
 tryAll :: NonEmpty a -> (a -> IO b) -> IO b
 tryAll (a :| []) f = f a
-tryAll (a :| aa) f = f a `catchAll` (const $ tryAll (NE.fromList aa) f)
+tryAll (a :| aa) f = f a `catchAll` const (tryAll (NE.fromList aa) f)
 
 atomically' :: STM a -> Client a
 atomically' = liftIO . atomically

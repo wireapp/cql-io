@@ -12,18 +12,31 @@
 module Database.CQL.IO.Types where
 
 import Control.Monad.Catch
+import Data.Hashable
 import Data.IP
-import Data.Text.Lazy (Text)
+import Data.String
+import Data.Text (Text)
 import Data.Typeable
-import Database.CQL.Protocol (Event, Response, CompressionAlgorithm)
+import Data.Unique
+import Database.CQL.Protocol
 import Network.Socket (SockAddr (..), PortNumber)
 import System.Logger.Message
+
+import qualified Data.Text.Lazy as Lazy
 
 type EventHandler = Event -> IO ()
 
 newtype Milliseconds = Ms { ms :: Int } deriving (Eq, Show, Num)
 
 type Raw a = a () () ()
+
+-----------------------------------------------------------------------------
+-- ConnId
+
+newtype ConnId = ConnId Unique deriving (Eq, Ord)
+
+instance Hashable ConnId where
+    hashWithSalt _ (ConnId u) = hashUnique u
 
 -----------------------------------------------------------------------------
 -- InetAddr
@@ -144,7 +157,7 @@ instance Show UnexpectedResponse where
 -----------------------------------------------------------------------------
 -- HashCollision
 
-data HashCollision = HashCollision !Text !Text
+data HashCollision = HashCollision !Lazy.Text !Lazy.Text
     deriving Typeable
 
 instance Exception HashCollision
@@ -155,6 +168,37 @@ instance Show HashCollision where
                              . showString " "
                              . shows b
                              $ ""
+
+-----------------------------------------------------------------------------
+-- Authentication
+
+-- | The (unique) name of a SASL authentication mechanism.
+--
+-- In the case of Cassandra, this is currently always the fully-qualified
+-- Java class name of the configured server-side @IAuthenticator@
+-- implementation.
+newtype AuthMechanism = AuthMechanism Text
+    deriving (Eq, Ord, Show, IsString, Hashable)
+
+data AuthenticationError
+    = AuthenticationRequired !AuthMechanism
+    | UnexpectedAuthenticationChallenge !AuthMechanism !AuthChallenge
+
+instance Exception AuthenticationError
+
+instance Show AuthenticationError where
+    show (AuthenticationRequired a)
+        = showString "cql-io: authentication required: "
+        . shows a
+        $ ""
+
+    show (UnexpectedAuthenticationChallenge n c)
+        = showString "cql-io: unexpected authentication challenge: '"
+        . shows c
+        . showString "' using mechanism '"
+        . shows n
+        . showString "'"
+        $ ""
 
 ignore :: IO () -> IO ()
 ignore a = catchAll a (const $ return ())

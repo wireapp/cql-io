@@ -63,6 +63,7 @@ library
         Database.CQL.IO.Cluster.Policies
         Database.CQL.IO.Connection
         Database.CQL.IO.Connection.Socket
+        Database.CQL.IO.Connection.Settings
         Database.CQL.IO.Hexdump
         Database.CQL.IO.Jobs
         Database.CQL.IO.Pool
@@ -101,6 +102,7 @@ library
         , time               >= 1.4
         , transformers       >= 0.3
         , transformers-base  >= 0.4
+        , unordered-containers >= 0.2
         , uuid               >= 1.2.6
         , vector             >= 0.10
 

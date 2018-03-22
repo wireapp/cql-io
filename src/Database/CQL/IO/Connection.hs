@@ -2,12 +2,15 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+{-# LANGUAGE LambdaCase          #-}
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE ViewPatterns        #-}
 
 module Database.CQL.IO.Connection
     ( Connection
+    , ConnId
     , resolve
     , ping
     , connect
@@ -20,17 +23,6 @@ module Database.CQL.IO.Connection
     , address
     , protocol
     , eventSig
-
-    , ConnectionSettings
-    , defSettings
-    , connectTimeout
-    , sendTimeout
-    , responseTimeout
-    , maxStreams
-    , compression
-    , defKeyspace
-    , maxRecvBuffer
-    , tlsContext
     ) where
 
 import Control.Applicative
@@ -52,6 +44,7 @@ import Data.Unique
 import Data.Vector (Vector, (!))
 import Database.CQL.Protocol
 import Database.CQL.IO.Connection.Socket (Socket)
+import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Hexdump
 import Database.CQL.IO.Protocol
 import Database.CQL.IO.Signal hiding (connect)
@@ -60,7 +53,6 @@ import Database.CQL.IO.Types
 import Database.CQL.IO.Tickets (Pool, toInt, markAvailable)
 import Database.CQL.IO.Timeouts (TimeoutManager, withTimeout)
 import Network.Socket hiding (Socket, close, connect, send)
-import OpenSSL.Session (SSLContext)
 import System.IO (nativeNewline, Newline (..))
 import System.Logger hiding (Settings, close, defSettings, settings)
 import System.Timeout
@@ -68,22 +60,12 @@ import Prelude
 
 import qualified Data.ByteString.Lazy              as L
 import qualified Data.ByteString.Lazy.Char8        as Char8
+import qualified Data.HashMap.Strict               as HashMap
 import qualified Data.Vector                       as Vector
 import qualified Database.CQL.IO.Connection.Socket as Socket
 import qualified Database.CQL.IO.Sync              as Sync
 import qualified Database.CQL.IO.Tickets           as Tickets
 import qualified Network.Socket                    as S
-
-data ConnectionSettings = ConnectionSettings
-    { _connectTimeout  :: !Milliseconds
-    , _sendTimeout     :: !Milliseconds
-    , _responseTimeout :: !Milliseconds
-    , _maxStreams      :: !Int
-    , _compression     :: !Compression
-    , _defKeyspace     :: !(Maybe Keyspace)
-    , _maxRecvBuffer   :: !Int
-    , _tlsContext      :: !(Maybe SSLContext)
-    }
 
 type Streams = Vector (Sync (Header, ByteString))
 
@@ -100,10 +82,9 @@ data Connection = Connection
     , _tickets  :: !Pool
     , _logger   :: !Logger
     , _eventSig :: !(Signal Event)
-    , _ident    :: !Unique
+    , _ident    :: !ConnId
     }
 
-makeLenses ''ConnectionSettings
 makeLenses ''Connection
 
 instance Eq Connection where
@@ -114,17 +95,6 @@ instance Show Connection where
 
 instance ToBytes Connection where
     bytes c = bytes (c^.address) +++ val "#" +++ c^.sock
-
-defSettings :: ConnectionSettings
-defSettings =
-    ConnectionSettings 5000          -- connect timeout
-                       3000          -- send timeout
-                       10000         -- response timeout
-                       128           -- max streams per connection
-                       noCompression -- compression
-                       Nothing       -- keyspace
-                       16384         -- receive buffer size
-                       Nothing       -- no tls by default
 
 resolve :: String -> PortNumber -> IO [InetAddr]
 resolve host port =
@@ -141,7 +111,7 @@ connect t m v g a = liftIO $ do
         sta <- newTVarIO True
         sig <- signal
         rdr <- async (readLoop v g t tck a s syn sig sta lck)
-        Connection t a m v s sta syn lck rdr tck g sig <$> newUnique
+        Connection t a m v s sta syn lck rdr tck g sig . ConnId <$> newUnique
     validateSettings c `onException` close c
     return c
 
@@ -216,7 +186,7 @@ request c f = send >>= receive
         let e = TimeoutRead (show c ++ ":" ++ show i)
         tid <- myThreadId
         withTimeout (c^.tmanager) (c^.settings.responseTimeout) (throwTo tid e) $ do
-            x <- Sync.get (view streams c ! i) `onException` (Sync.kill e) (view streams c ! i)
+            x <- Sync.get (view streams c ! i) `onException` Sync.kill e (view streams c ! i)
             markAvailable (c^.tickets) i
             return x
 
@@ -246,7 +216,54 @@ startup c = liftIO $ do
     let req = RqStartup (Startup Cqlv300 (algorithm cmp))
     let enc = serialise (c^.protocol) cmp (req :: Raw Request)
     res <- request c enc
-    (parse cmp res :: Raw Response) `seq` return ()
+    case parse cmp res :: Raw Response of
+        RsReady _ _ Ready       -> checkAuth c
+        RsAuthenticate _ _ auth -> authenticate c auth
+        RsError _ _ e           -> throwM e
+        other                   -> throwM $ UnexpectedResponse' other
+
+checkAuth :: Connection -> IO ()
+checkAuth c = unless (null (c^.settings.authenticators)) $
+    warn (_logger c) $ msg $ val
+        "Authentication configured but none required by server."
+
+authenticate :: (MonadIO m, MonadThrow m) => Connection -> Authenticate -> m ()
+authenticate c (Authenticate (AuthMechanism -> m)) =
+    case HashMap.lookup m (c^.settings.authenticators) of
+        Nothing -> throwM $ AuthenticationRequired m
+        Just Authenticator {
+            authOnRequest   = onR
+          , authOnChallenge = onC
+          , authOnSuccess   = onS
+        } -> liftIO $ do
+            (rs, s) <- onR context
+            case onC of
+                Just  f -> loop f onS (rs, s)
+                Nothing -> authResponse c rs >>= either
+                    (throwM . UnexpectedAuthenticationChallenge m)
+                    (onS s)
+  where
+    context = AuthContext (c^.ident) (c^.address)
+
+    loop onC onS (rs, s) =
+        authResponse c rs >>= either
+            (onC s >=> loop onC onS)
+            (onS s)
+
+authResponse :: MonadIO m
+             => Connection
+             -> AuthResponse
+             -> m (Either AuthChallenge AuthSuccess)
+authResponse c resp = liftIO $ do
+    let cmp = c^.settings.compression
+    let req = RqAuthResp resp
+    let enc = serialise (c^.protocol) cmp (req :: Raw Request)
+    res <- request c enc
+    case parse cmp res :: Raw Response of
+        RsAuthSuccess _ _ success     -> return $ Right success
+        RsAuthChallenge _ _ challenge -> return $ Left challenge
+        RsError _ _ e                 -> throwM e
+        other                         -> throwM $ UnexpectedResponse' other
 
 register :: MonadIO m => Connection -> [EventType] -> EventHandler -> m ()
 register c e f = liftIO $ do

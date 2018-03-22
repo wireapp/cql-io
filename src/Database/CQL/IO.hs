@@ -56,8 +56,7 @@
 module Database.CQL.IO
     ( -- * Client settings
       Settings
-    , PrepareStrategy (..)
-    , defSettings
+    , S.defSettings
     , addContact
     , setCompression
     , setConnectTimeout
@@ -70,6 +69,7 @@ module Database.CQL.IO
     , setPolicy
     , setPoolStripes
     , setPortNumber
+    , PrepareStrategy (..)
     , setPrepareStrategy
     , setProtocolVersion
     , setResponseTimeout
@@ -77,6 +77,18 @@ module Database.CQL.IO
     , setRetrySettings
     , setMaxRecvBuffer
     , setSSLContext
+
+      -- ** Authentication
+    , setAuthentication
+    , Authenticator (..)
+    , AuthContext
+    , ConnId
+    , authConnId
+    , authHost
+    , AuthMechanism (..)
+    , AuthUser      (..)
+    , AuthPass      (..)
+    , passwordAuthenticator
 
       -- ** Retry Settings
     , RetrySettings
@@ -145,13 +157,14 @@ module Database.CQL.IO
     , rack
 
     -- * Exceptions
-    , InvalidSettings    (..)
-    , InternalError      (..)
-    , HostError          (..)
-    , ConnectionError    (..)
-    , UnexpectedResponse (..)
-    , Timeout            (..)
-    , HashCollision      (..)
+    , InvalidSettings     (..)
+    , InternalError       (..)
+    , HostError           (..)
+    , ConnectionError     (..)
+    , UnexpectedResponse  (..)
+    , Timeout             (..)
+    , HashCollision       (..)
+    , AuthenticationError (..)
     ) where
 
 import Control.Applicative
@@ -163,8 +176,9 @@ import Database.CQL.IO.Batch hiding (batch)
 import Database.CQL.IO.Client
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
+import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.PrepQuery
-import Database.CQL.IO.Settings
+import Database.CQL.IO.Settings as S
 import Database.CQL.IO.Types
 import Prelude hiding (init)
 
