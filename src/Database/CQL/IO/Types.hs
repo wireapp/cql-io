@@ -51,7 +51,7 @@ instance Show InetAddr where
         let i = fromIntegral p :: Int in
         shows (fromHostAddress6 a) . showString ":" . shows i $ ""
     show (InetAddr (SockAddrUnix unix)) = unix
-#if MIN_VERSION_network(2,6,1)
+#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     show (InetAddr (SockAddrCan int32)) = show int32
 #endif
 
@@ -63,7 +63,7 @@ instance ToBytes InetAddr where
         let i = fromIntegral p :: Int in
         show (fromHostAddress6 a) +++ val ":" +++ i
     bytes (InetAddr (SockAddrUnix unix)) = bytes unix
-#if MIN_VERSION_network(2,6,1)
+#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     bytes (InetAddr (SockAddrCan int32)) = bytes int32
 #endif
 

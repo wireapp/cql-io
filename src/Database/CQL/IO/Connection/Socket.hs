@@ -66,7 +66,7 @@ mkSock (InetAddr a) = S.socket (familyOf a) S.Stream defaultProtocol
     familyOf (SockAddrInet  _ _)     = AF_INET
     familyOf (SockAddrInet6 _ _ _ _) = AF_INET6
     familyOf (SockAddrUnix  _)       = AF_UNIX
-#if MIN_VERSION_network(2,6,1)
+#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     familyOf (SockAddrCan   _      ) = AF_CAN
 #endif
 
