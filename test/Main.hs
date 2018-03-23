@@ -21,33 +21,42 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Text.RawString.QQ
 
-import qualified System.Logger as Logger
+import qualified Data.Set      as Set
+import qualified System.Logger as Log
+
+-----------------------------------------------------------------------------
+-- Test Setup
+
+type TestHost = String
 
 main :: IO ()
 main = do
     h <- fromMaybe "localhost" <$> lookupEnv "CASSANDRA_HOST"
-    g <- Logger.new Logger.defSettings
-    c <- Client.init g (setContacts h [] defSettings)
-    defaultMain $ testGroup "cql-io tests"
-        [ testCase "keyspace" (runClient c createKeyspace)
-        , testCase "table" (runClient c createTable)
-        , testCase "write and read" (runClient c insertTable)
-        , testCase "write and read with ttl" (runClient c insertTableTtl)
-        , testCase "drop keyspace" (runClient c dropKeyspace)
-        ]
+    g <- Log.new (Log.setLogLevel Log.Warn Log.defSettings)
+    defaultMain . testGroup "cql-io" =<<
+        forM versions (\v -> do
+            c <- Client.init g (settings h v)
+            return $ testGroup (show v) (tests c))
 
-createKeyspace :: Client ()
-createKeyspace = void $ schema cql (params ())
-  where
-    cql :: QueryString S () ()
-    cql = [r| create keyspace cqltest with replication = { 'class': 'SimpleStrategy', 'replication_factor': '1' } |]
+versions :: [Version]
+versions = [V3, V4]
 
-dropKeyspace :: Client ()
-dropKeyspace = void $ schema cql (params ())
-  where
-    cql :: QueryString S () ()
-    cql = [r| drop keyspace cqltest |]
+settings :: TestHost -> Version -> Settings
+settings h v = setContacts h []
+             . setProtocolVersion v
+             $ defSettings
 
+test :: ClientState -> String -> Client () -> TestTree
+test c name runTest = testCase name $ runClient c $ do
+    createKeyspace
+    createTables
+    truncateTables
+    runTest
+
+-----------------------------------------------------------------------------
+-- Test Schema
+
+-- Columns of cqltest.table1
 type Ty1 =
     ( Int64
     , Ascii
@@ -65,6 +74,7 @@ type Ty1 =
     , IP
     )
 
+-- Columns of cqltest.table2
 type Ty2 =
     ( Int64
     , [Int32]
@@ -75,15 +85,24 @@ type Ty2 =
     , Map Int32 (Map Int32 (Set Ascii))
     )
 
-createTable :: Client ()
-createTable = do
-    _ <- schema cql1 (params ())
-    _ <- schema cql2 (params ())
-    return ()
+createKeyspace :: Client ()
+createKeyspace = void $ schema cql (params ())
+  where
+    cql :: QueryString S () ()
+    cql = [r| create keyspace if not exists cqltest
+                with replication = {
+                    'class': 'SimpleStrategy',
+                    'replication_factor': '1'
+                } |]
+
+createTables :: Client ()
+createTables = do
+    void $ schema cql1 (params ())
+    void $ schema cql2 (params ())
   where
     cql1, cql2 :: QueryString S () ()
     cql1 = [r|
-        create columnfamily cqltest.test1
+        create table if not exists cqltest.test1
             ( a bigint
             , b ascii
             , c blob
@@ -100,8 +119,9 @@ createTable = do
             , n inet
             , primary key (a)
             ) |]
+
     cql2 = [r|
-        create columnfamily cqltest.test2
+        create table if not exists cqltest.test2
             ( a bigint
             , b list<int>
             , c set<ascii>
@@ -112,8 +132,28 @@ createTable = do
             , primary key (a)
             ) |]
 
-insertTable :: Client ()
-insertTable = do
+truncateTables :: Client ()
+truncateTables = do
+    void $ schema cql1 (params ())
+    void $ schema cql2 (params ())
+  where
+    cql1, cql2 :: QueryString S () ()
+    cql1 = "truncate table cqltest.test1"
+    cql2 = "truncate table cqltest.test2"
+
+-----------------------------------------------------------------------------
+-- Tests
+
+tests :: ClientState -> [TestTree]
+tests c =
+    [ test c "write-read" testWriteRead
+    , test c "write-read-ttl" testWriteReadTtl
+    , test c "trans" testTrans
+    , test c "paging" testPaging
+    ]
+
+testWriteRead :: Client ()
+testWriteRead = do
     t <- liftIO $ fmap (\x -> x { utctDayTime = secondsToDiffTime 3600 }) getCurrentTime
     let a = ( 4835637638
             , "hello world"
@@ -156,7 +196,11 @@ insertTable = do
             (?,?,?,?,?,?,?,?,?,?,?,?,?,?) |]
 
     ins2 :: PrepQuery W Ty2 ()
-    ins2 = [r| insert into cqltest.test2 (a,b,c,d,e,f,g) values (?,?,?,?,?,?,?) |]
+    ins2 = [r|
+        insert into cqltest.test2
+            (a,b,c,d,e,f,g)
+        values
+            (?,?,?,?,?,?,?) |]
 
     get1 :: PrepQuery R (Identity Int64) Ty1
     get1 = "select a,b,c,d,e,f,g,h,i,j,k,l,m,n from cqltest.test1 where a = ?"
@@ -164,18 +208,90 @@ insertTable = do
     get2 :: PrepQuery R (Identity Int64) Ty2
     get2 = "select a,b,c,d,e,f,g from cqltest.test2 where a = ?"
 
-insertTableTtl :: Client ()
-insertTableTtl = do
+testWriteReadTtl :: Client ()
+testWriteReadTtl = do
     write ins (params (1000, True))
     (True, Just ttl) <- fromJust <$> query1 get (params (Identity 1000))
     liftIO $ assertBool "TTL > 0" (ttl > 0)
   where
     ins :: PrepQuery W (Int64, Bool) ()
-    ins = [r| insert into cqltest.test1 (a,d) values (?,?) using ttl 3600 |]
+    ins = "insert into cqltest.test1 (a,d) values (?,?) using ttl 3600"
 
     get :: PrepQuery R (Identity Int64) (Bool, Maybe Int32)
     get = "select d, ttl(d) from cqltest.test1 where a = ?"
 
+testTrans :: Client ()
+testTrans = do
+    -- 1st insert (success)
+    [_row] <- trans ins (params (1, "ascii-1"))
+    assertApplied _row
+
+    -- 2nd insert (conflict)
+    [_row] <- trans ins (params (1, "ascii-1"))
+    liftIO $ do
+        rowLength _row @?= 15 -- [applied] + full existing row
+        fromRow 0 _row @?= Right (Just False)             -- [applied]
+        fromRow 1 _row @?= Right (Just (1 :: Int64))      -- a
+        fromRow 2 _row @?= Right (Just (Ascii "ascii-1")) -- b
+        -- remaining columns with null values (since none were inserted)
+        let vnull = Nothing :: Maybe Blob -- type irrelevant
+        map (($ _row) . fromRow) [3..14] @?= replicate 12 (Right vnull)
+
+    -- 1st update (success)
+    [_row] <- trans upd (params ("ascii-2", 1, "ascii-1"))
+    assertApplied _row
+
+    -- 2nd update (conflict)
+    [_row] <- trans upd (params ("ascii-2", 1, "ascii-1"))
+    liftIO $ do
+        rowLength _row @?= 2 -- [applied] + conflicting value
+        fromRow 0 _row @?= Right (Just False)             -- [applied]
+        fromRow 1 _row @?= Right (Just (Ascii "ascii-2")) -- b
+  where
+    ins :: PrepQuery W (Int64, Text) Row
+    ins = "insert into cqltest.test1 (a,b) values (?,?) if not exists"
+
+    upd :: PrepQuery W (Text, Int64, Text) Row
+    upd = "update cqltest.test1 set b = ? where a = ? if b = ?"
+
+    assertApplied row = liftIO $ do
+        rowLength row @?= 1 -- [applied]
+        fromRow 0 row @?= Right (Just True)
+
+testPaging :: Client ()
+testPaging = do
+    let dat = zip [1..101] (repeat "b")
+    mapM_ (write ins . params) dat
+    p <- paginate qry $ (params ()) { pageSize = Just 10 }
+    assertPages 11 (Set.fromList dat) p
+  where
+    ins :: PrepQuery W (Int64, Ascii) ()
+    ins = "insert into cqltest.test1 (a,b) values (?,?)"
+
+    qry :: PrepQuery R () (Int64, Ascii)
+    qry = "select a,b from cqltest.test1"
+
+-----------------------------------------------------------------------------
+-- Utilities
+
+assertPages :: (Ord a, Show a) => Int -> Set.Set a -> Page a -> Client ()
+assertPages numPages expected p = do
+    let got = Set.fromList (result p)
+    let remaining = Set.difference expected got
+    liftIO $ hasMore p @?= numPages > 1
+    liftIO $ got `Set.isSubsetOf` expected @?= True
+    if numPages > 1
+        then nextPage p >>= assertPages (numPages - 1) remaining
+        else liftIO $ remaining @?= Set.empty
+
 params :: Tuple a => a -> QueryParams a
-params p = QueryParams One False p Nothing Nothing Nothing Nothing
+params p = QueryParams
+    { consistency       = One
+    , skipMetaData      = False
+    , values            = p
+    , pageSize          = Nothing
+    , queryPagingState  = Nothing
+    , serialConsistency = Nothing
+    , enableTracing     = Nothing
+    }
 
