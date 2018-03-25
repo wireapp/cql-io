@@ -13,14 +13,14 @@
 -- > import Data.Text (Text)
 -- > import Data.Functor.Identity
 -- > import Database.CQL.IO as Client
--- > import Database.CQL.Protocol
 -- > import qualified System.Logger as Logger
 -- >
 -- > g <- Logger.new Logger.defSettings
 -- > c <- Client.init g defSettings
--- > let p = QueryParams One False () Nothing Nothing Nothing
--- > runClient c $ query ("SELECT cql_version from system.local" :: QueryString R () (Identity Text)) p
--- [Identity "3.2.0"]
+-- > let q = "SELECT cql_version from system.local" :: QueryString R () (Identity Text)
+-- > let p = defQueryParams One ()
+-- > runClient c (query q p)
+-- [Identity "3.4.4"]
 -- > shutdown c
 -- @
 --
@@ -55,7 +55,7 @@
 {-# LANGUAGE LambdaCase    #-}
 
 module Database.CQL.IO
-    ( -- * Client settings
+    ( -- * Client Settings
       Settings
     , S.defSettings
     , addContact
@@ -123,21 +123,37 @@ module Database.CQL.IO
     , DebugInfo   (..)
     , init
     , runClient
-    , retry
     , shutdown
     , debugInfo
 
-      -- * Executing Queries
+      -- * Queries
+    , R, W, S
+    , QueryParams       (..)
+    , defQueryParams
+    , Consistency       (..)
+    , SerialConsistency (..)
+    , QueryString       (..)
+
+      -- ** Basic Queries
     , query
     , query1
     , write
     , schema
-    , trans
 
       -- ** Prepared Queries
     , PrepQuery
     , prepared
     , queryString
+
+      -- ** Paging
+    , Page (..)
+    , emptyPage
+    , paginate
+
+      -- ** Lightweight Transactions
+    , Row
+    , fromRow
+    , trans
 
       -- ** Batch Queries
     , BatchM
@@ -148,12 +164,15 @@ module Database.CQL.IO
     , setSerialConsistency
     , batch
 
-      -- ** Paging
-    , Page (..)
-    , emptyPage
-    , paginate
+      -- ** Retries
+    , retry
+    , once
 
       -- ** Low-Level Queries
+      --
+      -- | Note: Use of these low-level functions may require additional imports from
+      -- @Database.CQL.Protocol@ or its submodules in order to construct
+      -- 'Request's and evaluate 'Response's.
     , RunQ (..)
     , request
 
@@ -194,6 +213,20 @@ instance RunQ QueryString where
 instance RunQ PrepQuery where
     runQ q = liftClient . execute q
 
+-- | Construct default 'QueryParams' for the given consistency
+-- and bound values. In particular, no page size, paging state
+-- or serial consistency will be set.
+defQueryParams :: Consistency -> a -> QueryParams a
+defQueryParams c a = QueryParams
+    { consistency       = c
+    , values            = a
+    , skipMetaData      = False
+    , pageSize          = Nothing
+    , queryPagingState  = Nothing
+    , serialConsistency = Nothing
+    , enableTracing     = Nothing
+    }
+
 -- | Run a CQL read-only query returning a list of results.
 query :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m [b]
 query q p = do
@@ -206,7 +239,7 @@ query q p = do
 query1 :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m (Maybe b)
 query1 q p = listToMaybe <$> query q p
 
--- | Run a CQL write-only query (e.g. insert/update/delete),
+-- | Run a CQL write-only query (e.g. insert\/update\/delete),
 -- returning no result.
 --
 -- /Note: If the write operation is conditional, i.e. is in fact a "lightweight
@@ -218,8 +251,8 @@ write q p = do
         VoidResult -> return ()
         _          -> throwM $ UnexpectedResponse r
 
--- | Run a CQL conditional write query (e.g. insert/update/delete) as a
--- \"lightweight transaction\", returning the result 'Row's describing the
+-- | Run a CQL conditional write query (e.g. insert\/update\/delete) as a
+-- "lightweight transaction", returning the result 'Row's describing the
 -- outcome.
 trans :: (MonadClient m, Tuple a, RunQ q) => q W a Row -> QueryParams a -> m [Row]
 trans q p = do

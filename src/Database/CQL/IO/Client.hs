@@ -31,6 +31,7 @@ module Database.CQL.IO.Client
     , executeWithPrepare
     , prepare
     , retry
+    , once
     , debugInfo
     , preparedQueries
     , withPrepareStrategy
@@ -132,8 +133,7 @@ makeLenses ''ClientState
 -- 'Database.CQL.IO.Client.init' and after finishing operation it should be
 -- terminated with 'shutdown'.
 --
--- Actual CQL queries are handled by invoking 'request'.
--- Additionally 'debugInfo' returns an internal cluster view.
+-- To lift 'Client' actions into another monad, see 'MonadClient'.
 newtype Client a = Client
     { client :: ReaderT ClientState IO a
     } deriving ( Functor
@@ -206,6 +206,16 @@ runClient p a = liftIO $ runReaderT (client a) p
 -- | Use given 'RetrySettings' during execution of some client action.
 retry :: MonadClient m => RetrySettings -> m a -> m a
 retry r = localState (set (context.settings.retrySettings) r)
+
+-- | Execute a client action once, without retries, i.e.
+--
+-- @once action = retry noRetry action@.
+--
+-- Primarily for use in applications where global 'RetrySettings'
+-- are configured and need to be selectively disabled for individual
+-- queries.
+once :: MonadClient m => m a -> m a
+once = retry noRetry
 
 -- | Change the default 'PrepareStrategy' for the given client action.
 withPrepareStrategy :: MonadClient m => PrepareStrategy -> m a -> m a
