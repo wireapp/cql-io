@@ -141,7 +141,7 @@ readLoop v g set tck i sck syn s sref wlck =
                 case parse (set^.compression) x :: Raw Response of
                     RsError _ _ e -> throwM e
                     RsEvent _ _ e -> emit s e
-                    r           -> throwM (UnexpectedResponse' r)
+                    r             -> throwM (UnexpectedResponse' r)
             sid -> do
                 ok <- Sync.put x (syn ! sid)
                 unless ok $

@@ -52,6 +52,7 @@
 -- action using 'withPrepareStrategy'.
 
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE LambdaCase    #-}
 
 module Database.CQL.IO
     ( -- * Client settings
@@ -102,10 +103,20 @@ module Database.CQL.IO
     , adjustSendTimeout
     , adjustResponseTimeout
 
-      -- * Query Runner
-    , RunQ (..)
+      -- ** Load-balancing
+    , Policy (..)
+    , random
+    , roundRobin
 
-      -- * Client monad
+      -- *** Hosts
+    , Host
+    , HostEvent (..)
+    , InetAddr  (..)
+    , hostAddr
+    , dataCentre
+    , rack
+
+      -- * Client Monad
     , Client
     , MonadClient (..)
     , ClientState
@@ -116,22 +127,19 @@ module Database.CQL.IO
     , shutdown
     , debugInfo
 
+      -- * Executing Queries
     , query
     , query1
     , write
     , schema
     , trans
 
-    , Page      (..)
-    , emptyPage
-    , paginate
-
-      -- * Prepared Queries
+      -- ** Prepared Queries
     , PrepQuery
     , prepared
     , queryString
 
-      -- * Batch
+      -- ** Batch Queries
     , BatchM
     , addQuery
     , addPrepQuery
@@ -140,23 +148,16 @@ module Database.CQL.IO
     , setSerialConsistency
     , batch
 
-      -- ** low-level
+      -- ** Paging
+    , Page (..)
+    , emptyPage
+    , paginate
+
+      -- ** Low-Level Queries
+    , RunQ (..)
     , request
 
-      -- * Policies
-    , Policy (..)
-    , random
-    , roundRobin
-
-      -- ** Hosts
-    , Host
-    , HostEvent (..)
-    , InetAddr  (..)
-    , hostAddr
-    , dataCentre
-    , rack
-
-    -- * Exceptions
+      -- * Exceptions
     , InvalidSettings     (..)
     , InternalError       (..)
     , HostError           (..)
@@ -168,7 +169,6 @@ module Database.CQL.IO
     ) where
 
 import Control.Applicative
-import Control.Monad (void)
 import Control.Monad.Catch
 import Data.Maybe (isJust, listToMaybe)
 import Database.CQL.Protocol
@@ -184,52 +184,58 @@ import Prelude hiding (init)
 
 import qualified Database.CQL.IO.Batch as B
 
--- | A type which can run a query against Cassandra.
+-- | A type which can be run as a query.
 class RunQ q where
     runQ :: (MonadClient m, Tuple a, Tuple b) => q k a b -> QueryParams a -> m (Response k a b)
 
 instance RunQ QueryString where
-    runQ q p = do
-        r <- request (RqQuery (Query q p))
-        case r of
-            RsError _ _ e -> throwM e
-            _             -> return r
+    runQ q p = request (RqQuery (Query q p))
 
 instance RunQ PrepQuery where
     runQ q = liftClient . execute q
 
--- | Run a CQL read-only query against a Cassandra node.
+-- | Run a CQL read-only query returning a list of results.
 query :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m [b]
 query q p = do
     r <- runQ q p
-    case r of
-        RsResult _ _ (RowsResult _ b) -> return b
-        _                             -> throwM UnexpectedResponse
+    getResult r >>= \case
+        RowsResult _ b -> return b
+        _              -> throwM $ UnexpectedResponse r
 
--- | Run a CQL read-only query against a Cassandra node.
+-- | Run a CQL read-only query returning a single result.
 query1 :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m (Maybe b)
 query1 q p = listToMaybe <$> query q p
 
--- | Run a CQL insert/update query against a Cassandra node.
+-- | Run a CQL write-only query (e.g. insert/update/delete),
+-- returning no result.
+--
+-- /Note: If the write operation is conditional, i.e. is in fact a "lightweight
+-- transaction" returning a result, 'trans' must be used instead./
 write :: (MonadClient m, Tuple a, RunQ q) => q W a () -> QueryParams a -> m ()
-write q p = void $ runQ q p
+write q p = do
+    r <- runQ q p
+    getResult r >>= \case
+        VoidResult -> return ()
+        _          -> throwM $ UnexpectedResponse r
 
--- | Run a CQL insert/update query as a \"lightweight transaction\" against a Cassandra node.
+-- | Run a CQL conditional write query (e.g. insert/update/delete) as a
+-- \"lightweight transaction\", returning the result 'Row's describing the
+-- outcome.
 trans :: (MonadClient m, Tuple a, RunQ q) => q W a Row -> QueryParams a -> m [Row]
 trans q p = do
     r <- runQ q p
-    case r of
-        RsResult _ _ (RowsResult _ b) -> return b
-        _                             -> throwM UnexpectedResponse
+    getResult r >>= \case
+        RowsResult _ b -> return b
+        _              -> throwM $ UnexpectedResponse' r
 
--- | Run a CQL schema query against a Cassandra node.
+-- | Run a CQL schema query, returning 'SchemaChange' information, if any.
 schema :: (MonadClient m, Tuple a, RunQ q) => q S a () -> QueryParams a -> m (Maybe SchemaChange)
-schema x y = do
-    r <- runQ x y
-    case r of
-        RsResult _ _ (SchemaChangeResult s) -> return $ Just s
-        RsResult _ _ VoidResult             -> return Nothing
-        _                                   -> throwM UnexpectedResponse
+schema q p = do
+    r <- runQ q p
+    getResult r >>= \case
+        SchemaChangeResult s -> return $ Just s
+        VoidResult           -> return Nothing
+        _                    -> throwM $ UnexpectedResponse r
 
 -- | Run a batch query against a Cassandra node.
 batch :: MonadClient m => BatchM () -> m ()
@@ -261,10 +267,11 @@ paginate :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams 
 paginate q p = do
     let p' = p { pageSize = pageSize p <|> Just 10000 }
     r <- runQ q p'
-    case r of
-        RsResult _ _ (RowsResult m b) ->
+    getResult r >>= \case
+        RowsResult m b ->
             if isJust (pagingState m) then
                 return $ Page True b (paginate q p' { queryPagingState = pagingState m })
             else
                 return $ Page False b (return emptyPage)
-        _ -> throwM UnexpectedResponse
+        _ -> throwM $ UnexpectedResponse r
+

@@ -37,7 +37,7 @@ data Policy = Policy
       -- through this function.
     , select :: IO (Maybe Host)
       -- ^ Host selection. The driver will ask for a host to use in a query
-      -- through this function. A policy which has no available nodes my
+      -- through this function. A policy which has no available nodes may
       -- return Nothing.
     , current :: IO [Host]
       -- ^ Return all currently alive hosts.
