@@ -10,6 +10,7 @@ import Control.Monad.IO.Class
 import Data.Decimal
 import Data.Int
 import Data.IP
+import Data.List (sort)
 import Data.Maybe
 import Data.Text (Text)
 import Data.Time
@@ -33,6 +34,7 @@ main :: IO ()
 main = do
     h <- fromMaybe "localhost" <$> lookupEnv "CASSANDRA_HOST"
     g <- Log.new (Log.setLogLevel Log.Warn Log.defSettings)
+    initSchema g h
     defaultMain . testGroup "cql-io" =<<
         forM versions (\v -> do
             c <- Client.init g (settings h v)
@@ -46,12 +48,21 @@ settings h v = setContacts h []
              . setProtocolVersion v
              $ defSettings
 
+initSchema :: Log.Logger -> TestHost -> IO ()
+initSchema g h = do
+    c <- Client.init g (settings h V4)
+    runClient c $ do
+        dropKeyspace
+        createKeyspace
+        createTables
+    shutdown c
+
 test :: ClientState -> String -> Client () -> TestTree
-test c name runTest = testCase name $ runClient c $ do
-    createKeyspace
-    createTables
-    truncateTables
-    runTest
+test c name runTest =
+    testCase name $
+        runClient c $ do
+            truncateTables
+            runTest
 
 -----------------------------------------------------------------------------
 -- Test Schema
@@ -95,12 +106,17 @@ createKeyspace = void $ schema cql (params ())
                     'replication_factor': '1'
                 } |]
 
-createTables :: Client ()
-createTables = do
-    void $ schema cql1 (params ())
-    void $ schema cql2 (params ())
+dropKeyspace :: Client ()
+dropKeyspace = void $ schema cql (params ())
   where
-    cql1, cql2 :: QueryString S () ()
+    cql :: QueryString S () ()
+    cql = "drop keyspace if exists cqltest"
+
+createTables :: Client ()
+createTables = forM_ [cql1, cql2, cql3] $ \q ->
+    void $ schema q (params ())
+  where
+    cql1, cql2, cql3 :: QueryString S () ()
     cql1 = [r|
         create table if not exists cqltest.test1
             ( a bigint
@@ -132,14 +148,21 @@ createTables = do
             , primary key (a)
             ) |]
 
+    cql3 = [r|
+        create table if not exists cqltest.counters
+            ( a bigint
+            , n counter
+            , primary key (a)
+            ) |]
+
 truncateTables :: Client ()
-truncateTables = do
-    void $ schema cql1 (params ())
-    void $ schema cql2 (params ())
+truncateTables = forM_ [cql1, cql2, cql3] $ \q ->
+    void $ schema q (params ())
   where
-    cql1, cql2 :: QueryString S () ()
+    cql1, cql2, cql3 :: QueryString S () ()
     cql1 = "truncate table cqltest.test1"
     cql2 = "truncate table cqltest.test2"
+    cql3 = "truncate table cqltest.counters"
 
 -----------------------------------------------------------------------------
 -- Tests
@@ -150,6 +173,8 @@ tests c =
     , test c "write-read-ttl" testWriteReadTtl
     , test c "trans" testTrans
     , test c "paging" testPaging
+    , test c "batch" testBatch
+    , test c "batch-counter" testBatchCounter
     ]
 
 testWriteRead :: Client ()
@@ -270,6 +295,48 @@ testPaging = do
 
     qry :: PrepQuery R () (Int64, Ascii)
     qry = "select a,b from cqltest.test1"
+
+testBatch :: Client ()
+testBatch = do
+    exec $ setType BatchLogged
+    exec $ setType BatchUnLogged
+    exec $ setSerialConsistency SerialConsistency
+    exec $ setSerialConsistency LocalSerialConsistency
+  where
+    exec configure = do
+        batch $ configure >> forM_ dat (addQuery ins)
+        rs <- query qry (params ())
+        liftIO $ sort rs @?= dat
+        truncateTables
+
+    dat :: [(Int64, Ascii)]
+    dat = [(1, "1"), (2, "2"), (3, "3")]
+
+    ins :: QueryString W (Int64, Ascii) ()
+    ins = "insert into cqltest.test1 (a,b) values (?,?)"
+
+    qry :: PrepQuery R () (Int64, Ascii)
+    qry = "select a,b from cqltest.test1"
+
+testBatchCounter :: Client ()
+testBatchCounter = exec >> total 3 >> exec >> total 6
+  where
+    exec = batch $ do
+        setType BatchCounter
+        addQuery upd (Identity 1)
+        addQuery upd (Identity 2)
+        addQuery upd (Identity 3)
+
+    total n = do
+        rs <- query qry (params ())
+        let n' = sum (map (fromCounter . runIdentity) rs)
+        liftIO $ n @=? n'
+
+    upd :: QueryString W (Identity Int64) ()
+    upd = "update cqltest.counters set n = n + 1 where a = ?"
+
+    qry :: PrepQuery R () (Identity Counter)
+    qry = "select n from cqltest.counters"
 
 -----------------------------------------------------------------------------
 -- Utilities

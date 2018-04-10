@@ -5,7 +5,7 @@ packages:
 
 extra-deps:
   - git: https://gitlab.com/twittner/cql.git
-    commit: b08f750d42b21bd96518ad6a3d152d3e4a3a50ac
+    commit: f67eae4697720404d872330889ec778597723354
 
 system-ghc: true
 
