@@ -57,7 +57,7 @@ makeLenses ''Settings
 --
 -- * load-balancing policy is 'random'
 --
--- * binary protocol version is 3 (supported by Cassandra >= 2.1.0)
+-- * binary protocol version is 3
 --
 -- * connection idle timeout is 60s
 --
@@ -83,7 +83,7 @@ defSettings = Settings
     C.defSettings
     noRetry
     V3
-    (fromInteger 9042)
+    9042
     ("localhost" :| [])
     random
     LazyPrepare

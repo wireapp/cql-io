@@ -3,9 +3,8 @@ resolver: lts-10.8
 packages:
   - .
 
-extra-deps:
-  - git: https://gitlab.com/twittner/cql.git
-    commit: f67eae4697720404d872330889ec778597723354
-
 system-ghc: true
+
+extra-deps:
+  - cql-4.0.0
 

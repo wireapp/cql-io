@@ -1,7 +1,11 @@
-0.17.0
+1.0.0
 ------
 - Add support for CQL V4 binary protocol.
 - Remove support for CQL V2 binary protocol.
+- Add support for SASL-based authentication handlers.
+- Bugfix: Retries for error responses were not handled correctly.
+- Update and extend test suite.
+- Require `cql >= 4.0`
 
 0.16.0
 ------
