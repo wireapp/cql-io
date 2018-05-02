@@ -15,14 +15,15 @@ import Data.Monoid
 import Data.Time
 import Data.Word
 import Database.CQL.Protocol
-import Database.CQL.IO.Connection
 import Database.CQL.IO.Cluster.Policies (Policy, random)
-import Database.CQL.IO.Connection as C
+import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.Pool as P
 import Database.CQL.IO.Types (Milliseconds (..))
 import Network.Socket (PortNumber (..))
 import OpenSSL.Session (SSLContext)
 import Prelude
+
+import qualified Data.HashMap.Strict as HashMap
 
 data PrepareStrategy
     = EagerPrepare -- ^ cluster-wide preparation
@@ -56,7 +57,7 @@ makeLenses ''Settings
 --
 -- * load-balancing policy is 'random'
 --
--- * binary protocol version is 3 (supported by Cassandra >= 2.1.0)
+-- * binary protocol version is 3
 --
 -- * connection idle timeout is 60s
 --
@@ -82,7 +83,7 @@ defSettings = Settings
     C.defSettings
     noRetry
     V3
-    (fromInteger 9042)
+    9042
     ("localhost" :| [])
     random
     LazyPrepare
@@ -153,10 +154,9 @@ setCompression v = set (connSettings.compression) v
 -- binary protocol at most 128 streams can be used. Version 3 supports up
 -- to 32768 streams.
 setMaxStreams :: Int -> Settings -> Settings
-setMaxStreams v s = case s^.protoVersion of
-    V2 | v < 1 || v > 128   -> error "cql-io settings: max. streams must be within [1, 128]"
-    V3 | v < 1 || v > 32768 -> error "cql-io settings: max. streams must be within [1, 32768]"
-    _                       -> set (connSettings.maxStreams) v s
+setMaxStreams v s
+    | v < 1 || v > 32768 = error "cql-io settings: max. streams must be within [1, 32768]"
+    | otherwise          = set (connSettings.maxStreams) v s
 
 -- | Set the connect timeout of a connection.
 setConnectTimeout :: NominalDiffTime -> Settings -> Settings
@@ -194,6 +194,17 @@ setMaxRecvBuffer v = set (connSettings.maxRecvBuffer) v
 -- This will make client server queries use TLS.
 setSSLContext :: SSLContext -> Settings -> Settings
 setSSLContext v = set (connSettings.tlsContext) (Just v)
+
+-- | Set the supported authentication mechanisms.
+--
+-- When a Cassandra server requests authentication on a connection,
+-- it specifies the requested 'AuthMechanism'. The client 'Authenticator'
+-- is chosen based that name. If no authenticator with a matching
+-- name is configured, an 'AuthenticationError' is thrown.
+setAuthentication :: [C.Authenticator] -> Settings -> Settings
+setAuthentication = set (connSettings.authenticators)
+                  . HashMap.fromList
+                  . map (\a -> (authMechanism a, a))
 
 -----------------------------------------------------------------------------
 -- Retry Settings

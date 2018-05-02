@@ -1,0 +1,10 @@
+resolver: lts-10.8
+
+packages:
+  - .
+
+system-ghc: true
+
+extra-deps:
+  - cql-4.0.0
+

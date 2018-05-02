@@ -4,6 +4,7 @@
 
 {-# LANGUAGE CPP                        #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE LambdaCase                 #-}
 
 module Database.CQL.IO.Batch
     ( BatchM
@@ -35,14 +36,11 @@ newtype BatchM a = BatchM
 -- | Execute the complete 'Batch' statement.
 batch :: BatchM a -> Client ()
 batch m = do
-    b <- execStateT (unBatchM m) s
-    checkRs =<< executeWithPrepare Nothing (RqBatch b :: Raw Request)
-  where
-    checkRs (RsResult _ VoidResult) = return ()
-    checkRs (RsError  _ e)          = throwM e
-    checkRs _                       = throwM UnexpectedResponse
-
-    s = Batch BatchLogged [] Quorum Nothing
+    b <- execStateT (unBatchM m) (Batch BatchLogged [] Quorum Nothing)
+    r <- executeWithPrepare Nothing (RqBatch b :: Raw Request)
+    getResult r >>= \case
+        VoidResult -> return ()
+        _          -> throwM $ UnexpectedResponse' r
 
 -- | Add a query to this batch.
 addQuery :: (Show a, Tuple a, Tuple b) => QueryString W a b -> a -> BatchM ()

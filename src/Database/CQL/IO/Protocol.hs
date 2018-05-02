@@ -8,6 +8,7 @@ module Database.CQL.IO.Protocol where
 
 import Control.Exception (throw)
 import Data.ByteString.Lazy (ByteString)
+import Data.Maybe (fromMaybe)
 import Data.Monoid ((<>))
 import Database.CQL.Protocol
 import Database.CQL.IO.Types
@@ -27,7 +28,12 @@ serialise v f r i =
                 OcOptions -> noCompression
                 _         -> f
         s = mkStreamId i
-    in either (throw $ InternalError "request creation") id (pack v c False s r)
+    in either (throw $ InternalError "request creation") id (pack v c (isTracing r) s r)
+  where
+    isTracing :: Request k a b -> Bool
+    isTracing (RqQuery (Query _ p))     = fromMaybe False $ enableTracing p
+    isTracing (RqExecute (Execute _ p)) = fromMaybe False $ enableTracing p
+    isTracing _                         = False
 
 quoted :: LT.Text -> LT.Text
 quoted s = "\"" <> LT.replace "\"" "\"\"" s <> "\""

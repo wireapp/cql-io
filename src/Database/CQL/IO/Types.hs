@@ -12,18 +12,31 @@
 module Database.CQL.IO.Types where
 
 import Control.Monad.Catch
+import Data.Hashable
 import Data.IP
-import Data.Text.Lazy (Text)
+import Data.String
+import Data.Text (Text)
 import Data.Typeable
-import Database.CQL.Protocol (Event, Response, CompressionAlgorithm)
+import Data.Unique
+import Database.CQL.Protocol
 import Network.Socket (SockAddr (..), PortNumber)
 import System.Logger.Message
+
+import qualified Data.Text.Lazy as Lazy
 
 type EventHandler = Event -> IO ()
 
 newtype Milliseconds = Ms { ms :: Int } deriving (Eq, Show, Num)
 
 type Raw a = a () () ()
+
+-----------------------------------------------------------------------------
+-- ConnId
+
+newtype ConnId = ConnId Unique deriving (Eq, Ord)
+
+instance Hashable ConnId where
+    hashWithSalt _ (ConnId u) = hashUnique u
 
 -----------------------------------------------------------------------------
 -- InetAddr
@@ -38,7 +51,7 @@ instance Show InetAddr where
         let i = fromIntegral p :: Int in
         shows (fromHostAddress6 a) . showString ":" . shows i $ ""
     show (InetAddr (SockAddrUnix unix)) = unix
-#if MIN_VERSION_network(2,6,1)
+#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     show (InetAddr (SockAddrCan int32)) = show int32
 #endif
 
@@ -50,7 +63,7 @@ instance ToBytes InetAddr where
         let i = fromIntegral p :: Int in
         show (fromHostAddress6 a) +++ val ":" +++ i
     bytes (InetAddr (SockAddrUnix unix)) = bytes unix
-#if MIN_VERSION_network(2,6,1)
+#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     bytes (InetAddr (SockAddrCan int32)) = bytes int32
 #endif
 
@@ -130,21 +143,44 @@ instance Show Timeout where
 -----------------------------------------------------------------------------
 -- UnexpectedResponse
 
+-- | Placeholder for parts of a 'Response' that are not 'Show'able.
+data NoShow = NoShow deriving Show
+
 data UnexpectedResponse where
-    UnexpectedResponse  :: UnexpectedResponse
+    UnexpectedResponse  :: !(Response k a b) -> UnexpectedResponse
     UnexpectedResponse' :: Show b => !(Response k a b) -> UnexpectedResponse
 
 deriving instance Typeable UnexpectedResponse
 instance Exception UnexpectedResponse
 
 instance Show UnexpectedResponse where
-    show UnexpectedResponse      = "cql-io: unexpected response"
-    show (UnexpectedResponse' r) = "cql-io: unexpected response: " ++ show r
+    show x = showString "cql-io: unexpected response: "
+           . case x of
+                UnexpectedResponse  r  -> shows (f r)
+                UnexpectedResponse' r  -> shows r
+           $ ""
+      where
+        f :: Response k a b -> Response k a NoShow
+        f (RsError         a b c) = RsError a b c
+        f (RsReady         a b c) = RsReady a b c
+        f (RsAuthenticate  a b c) = RsAuthenticate a b c
+        f (RsAuthChallenge a b c) = RsAuthChallenge a b c
+        f (RsAuthSuccess   a b c) = RsAuthSuccess a b c
+        f (RsSupported     a b c) = RsSupported a b c
+        f (RsResult        a b c) = RsResult a b (g c)
+        f (RsEvent         a b c) = RsEvent a b c
+
+        g :: Result k a b -> Result k a NoShow
+        g VoidResult                       = VoidResult
+        g (RowsResult              a  b  ) = RowsResult a (map (const NoShow) b)
+        g (SetKeyspaceResult       a     ) = SetKeyspaceResult a
+        g (SchemaChangeResult      a     ) = SchemaChangeResult a
+        g (PreparedResult (QueryId a) b c) = PreparedResult (QueryId a) b c
 
 -----------------------------------------------------------------------------
 -- HashCollision
 
-data HashCollision = HashCollision !Text !Text
+data HashCollision = HashCollision !Lazy.Text !Lazy.Text
     deriving Typeable
 
 instance Exception HashCollision
@@ -155,6 +191,37 @@ instance Show HashCollision where
                              . showString " "
                              . shows b
                              $ ""
+
+-----------------------------------------------------------------------------
+-- Authentication
+
+-- | The (unique) name of a SASL authentication mechanism.
+--
+-- In the case of Cassandra, this is currently always the fully-qualified
+-- Java class name of the configured server-side @IAuthenticator@
+-- implementation.
+newtype AuthMechanism = AuthMechanism Text
+    deriving (Eq, Ord, Show, IsString, Hashable)
+
+data AuthenticationError
+    = AuthenticationRequired !AuthMechanism
+    | UnexpectedAuthenticationChallenge !AuthMechanism !AuthChallenge
+
+instance Exception AuthenticationError
+
+instance Show AuthenticationError where
+    show (AuthenticationRequired a)
+        = showString "cql-io: authentication required: "
+        . shows a
+        $ ""
+
+    show (UnexpectedAuthenticationChallenge n c)
+        = showString "cql-io: unexpected authentication challenge: '"
+        . shows c
+        . showString "' using mechanism '"
+        . shows n
+        . showString "'"
+        $ ""
 
 ignore :: IO () -> IO ()
 ignore a = catchAll a (const $ return ())
