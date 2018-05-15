@@ -79,7 +79,7 @@ library
     build-depends:
           async              >= 2.0
         , auto-update        >= 0.1
-        , base               >= 4.7   && < 5.0
+        , base               >= 4.9   && < 5.0
         , bytestring         >= 0.10
         , containers         >= 0.5
         , cql                >= 4.0
