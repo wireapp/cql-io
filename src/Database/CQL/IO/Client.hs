@@ -296,7 +296,6 @@ executeWithPrepare h q = do
                 Just  s -> do
                     (g, _) <- prepare (Just LazyPrepare) (s :: Raw QueryString)
                     executeWithPrepare (Just g) q
-        RsError _ _ e -> throwM e
         x -> return x
   where
     selectAction Nothing  = view policy >>= liftIO . hostCount >>= return . requestN
@@ -500,6 +499,12 @@ monitor ctx initial upperBound h = do
 -----------------------------------------------------------------------------
 -- Exception handling
 
+-- [Note: Error responses]
+-- Cassandra error responses that can be retried are locally thrown as
+-- exceptions to achieve a unified handling of retries in the context of a
+-- single retry policy, together with other recoverable (i.e. retryable)
+-- exceptions. However, error responses must not escape this function as
+-- exceptions, but always be returned as part of the 'Response'.
 withRetries
     :: (Tuple a, Tuple b)
     => (Request k a b -> ClientState -> Client (Maybe (Host, Response k a b)))
@@ -508,16 +513,16 @@ withRetries
 withRetries fn a = do
     s <- ask
     let p = s^.context.settings.retrySettings.retryPolicy
-    recovering p recoverFrom $ \i -> do
+    recovering p canRecover $ \i -> do
         r <- if rsIterNumber i == 0
                  then fn a s
                  else fn (newRequest s) (adjust s)
         case r of
             Nothing -> throwM HostsBusy
             Just hr -> case snd hr of
-                RsError _ _ e -> applyPolicy p i
-                             >>= maybe (return hr) (const (throwM e))
-                _             -> return hr
+                RsError _ _ e | canRetry e -- [Note: Error responses]
+                    -> applyPolicy p i >>= maybe (return hr) (const (throwM e))
+                _   -> return hr
   where
     adjust s =
         let x = s^.context.settings.retrySettings.sendTimeoutChange
@@ -536,14 +541,16 @@ withRetries fn a = do
                     RqBatch b               -> RqBatch b { batchConsistency = c }
                     _                       -> a
 
-    recoverFrom =
-        [ const $ Handler $ \e -> return $ case e of
-            ReadTimeout  {} -> True
-            WriteTimeout {} -> True
-            Overloaded   {} -> True
-            Unavailable  {} -> True
-            ServerError  {} -> True
-            _               -> False
+    canRetry e = case e of
+        ReadTimeout  {} -> True
+        WriteTimeout {} -> True
+        Overloaded   {} -> True
+        Unavailable  {} -> True
+        ServerError  {} -> True
+        _               -> False
+
+    canRecover =
+        [ const $ Handler $ \(_ :: Error)            -> return True -- [Note: Error responses]
         , const $ Handler $ \(_ :: ConnectionError)  -> return True
         , const $ Handler $ \(_ :: IOException)      -> return True
         , const $ Handler $ \(_ :: HostError)        -> return True
