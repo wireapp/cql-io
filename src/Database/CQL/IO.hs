@@ -181,7 +181,6 @@ module Database.CQL.IO
     , InternalError       (..)
     , HostError           (..)
     , ConnectionError     (..)
-    , ResponseError       (..)
     , UnexpectedResponse  (..)
     , Timeout             (..)
     , HashCollision       (..)
@@ -209,7 +208,7 @@ class RunQ q where
     runQ :: (MonadClient m, Tuple a, Tuple b)
          => q k a b
          -> QueryParams a
-         -> m (HostResponse k a b)
+         -> m (Response k a b)
 
 instance RunQ QueryString where
     runQ q p = request (RqQuery (Query q p))
@@ -237,7 +236,7 @@ query q p = do
     r <- runQ q p
     getResult r >>= \case
         RowsResult _ b -> return b
-        _              -> throwM $ UnexpectedHostResponse r
+        _              -> throwM $ UnexpectedResponse r
 
 -- | Run a CQL read-only query returning a single result.
 query1 :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m (Maybe b)
@@ -253,7 +252,7 @@ write q p = do
     r <- runQ q p
     getResult r >>= \case
         VoidResult -> return ()
-        _          -> throwM $ UnexpectedHostResponse r
+        _          -> throwM $ UnexpectedResponse r
 
 -- | Run a CQL conditional write query (e.g. insert\/update\/delete) as a
 -- "lightweight transaction", returning the result 'Row's describing the
@@ -263,7 +262,7 @@ trans q p = do
     r <- runQ q p
     getResult r >>= \case
         RowsResult _ b -> return b
-        _              -> throwM $ UnexpectedHostResponse r
+        _              -> throwM $ UnexpectedResponse r
 
 -- | Run a CQL schema query, returning 'SchemaChange' information, if any.
 schema :: (MonadClient m, Tuple a, RunQ q) => q S a () -> QueryParams a -> m (Maybe SchemaChange)
@@ -272,7 +271,7 @@ schema q p = do
     getResult r >>= \case
         SchemaChangeResult s -> return $ Just s
         VoidResult           -> return Nothing
-        _                    -> throwM $ UnexpectedHostResponse r
+        _                    -> throwM $ UnexpectedResponse r
 
 -- | Run a batch query against a Cassandra node.
 batch :: MonadClient m => BatchM () -> m ()
@@ -310,5 +309,5 @@ paginate q p = do
                 return $ Page True b (paginate q p' { queryPagingState = pagingState m })
             else
                 return $ Page False b (return emptyPage)
-        _ -> throwM $ UnexpectedHostResponse r
+        _ -> throwM $ UnexpectedResponse r
 
