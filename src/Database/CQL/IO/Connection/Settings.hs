@@ -37,6 +37,7 @@ import Control.Monad
 import Data.HashMap.Strict (HashMap)
 import Data.Int
 import Database.CQL.Protocol
+import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Types
 import OpenSSL.Session (SSLContext)
 import Prelude

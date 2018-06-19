@@ -17,7 +17,6 @@ import Control.Monad
 import Data.Map.Strict (Map)
 import Data.Word
 import Database.CQL.IO.Cluster.Host
-import Database.CQL.IO.Types (InetAddr)
 import System.Random.MWC
 import Prelude
 

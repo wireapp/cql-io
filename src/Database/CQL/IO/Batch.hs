@@ -40,7 +40,7 @@ batch m = do
     r <- executeWithPrepare Nothing (RqBatch b :: Raw Request)
     getResult r >>= \case
         VoidResult -> return ()
-        _          -> throwM $ UnexpectedResponse' r
+        _          -> throwM $ UnexpectedHostResponse r
 
 -- | Add a query to this batch.
 addQuery :: (Show a, Tuple a, Tuple b) => QueryString W a b -> a -> BatchM ()
