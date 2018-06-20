@@ -174,6 +174,7 @@ module Database.CQL.IO
       -- @Database.CQL.Protocol@ or its submodules in order to construct
       -- 'Request's and evaluate 'Response's.
     , RunQ (..)
+    , HostResponse (..)
     , request
 
       -- * Exceptions
@@ -181,6 +182,7 @@ module Database.CQL.IO
     , InternalError       (..)
     , HostError           (..)
     , ConnectionError     (..)
+    , ResponseError       (..)
     , UnexpectedResponse  (..)
     , Timeout             (..)
     , HashCollision       (..)
@@ -208,7 +210,7 @@ class RunQ q where
     runQ :: (MonadClient m, Tuple a, Tuple b)
          => q k a b
          -> QueryParams a
-         -> m (Response k a b)
+         -> m (HostResponse k a b)
 
 instance RunQ QueryString where
     runQ q p = request (RqQuery (Query q p))

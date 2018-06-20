@@ -126,7 +126,7 @@ instance Show Timeout where
 data NoShow = NoShow deriving Show
 
 data UnexpectedResponse where
-    UnexpectedResponse     :: !(Response k a b) -> UnexpectedResponse
+    UnexpectedResponse     :: !(HostResponse k a b) -> UnexpectedResponse
     UnexpectedResponse'    :: Show b => !(Response k a b) -> UnexpectedResponse
 
 deriving instance Typeable UnexpectedResponse
@@ -135,7 +135,7 @@ instance Exception UnexpectedResponse
 instance Show UnexpectedResponse where
     show x = showString "cql-io: unexpected response: "
            . case x of
-                UnexpectedResponse  r -> shows (f r)
+                UnexpectedResponse  r -> shows (f (hrResponse r))
                 UnexpectedResponse' r -> shows r
            $ ""
       where

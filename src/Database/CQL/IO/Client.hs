@@ -232,10 +232,10 @@ withPrepareStrategy s = localState (set (context.settings.prepStrategy) s)
 -- or the maximum wait-queue length has been reached.
 --
 -- The request is retried according to the configured 'RetrySettings'.
-request :: (MonadClient m, Tuple a, Tuple b) => Request k a b -> m (Response k a b)
+request :: (MonadClient m, Tuple a, Tuple b) => Request k a b -> m (HostResponse k a b)
 request a = liftClient $ do
     n <- liftIO . hostCount =<< view policy
-    hrResponse <$> withRetries (requestN n) a
+    withRetries (requestN n) a
 
 -- | Invoke 'request1' up to @n@ times with different hosts if no
 -- connection is available. May return 'Nothing' if no connection
@@ -328,12 +328,12 @@ prepare Nothing qs = do
     prepare (Just ps) qs
 
 -- | Execute a prepared query (transparently re-preparing if necessary).
-execute :: (Tuple b, Tuple a) => PrepQuery k a b -> QueryParams a -> Client (Response k a b)
+execute :: (Tuple b, Tuple a) => PrepQuery k a b -> QueryParams a -> Client (HostResponse k a b)
 execute q p = do
     pq <- view prepQueries
     maybe (new pq) (run Nothing) =<< atomically' (PQ.lookupQueryId q pq)
   where
-    run h i = hrResponse <$> executeWithPrepare h (RqExecute (Execute i p))
+    run h i = executeWithPrepare h (RqExecute (Execute i p))
     new pq  = do
         (h, i) <- prepare (Just LazyPrepare) (PQ.queryString q)
         atomically' (PQ.insert q i pq)
@@ -667,18 +667,18 @@ prepareAllQueries h = do
 -----------------------------------------------------------------------------
 -- Utilities
 
-getResult :: MonadThrow m => Response k a b -> m (Result k a b)
-getResult (RsResult _ _ r) = return r
-getResult (RsError  _ _ e) = throwM e
-getResult hr               = throwM (UnexpectedResponse hr)
+getResult :: MonadThrow m => HostResponse k a b -> m (Result k a b)
+getResult (HostResponse _ (RsResult _ _ r)) = return r
+getResult (HostResponse h (RsError  t w e)) = throwM (ResponseError h t w e)
+getResult hr                                = throwM (UnexpectedResponse hr)
 {-# INLINE getResult #-}
 
 getPreparedQueryId :: MonadThrow m => HostResponse k a b -> m (Host, QueryId k a b)
 getPreparedQueryId hr = do
-    r <- getResult (hrResponse hr)
+    r <- getResult hr
     case r of
         PreparedResult i _ _ -> return (hrHost hr, i)
-        _                    -> throwM $ UnexpectedResponse (hrResponse hr)
+        _                    -> throwM $ UnexpectedResponse hr
 {-# INLINE getPreparedQueryId #-}
 
 peer2Host :: PortNumber -> Peer -> Host
