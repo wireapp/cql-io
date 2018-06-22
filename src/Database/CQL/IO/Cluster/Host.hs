@@ -20,10 +20,16 @@ data Host = Host
     { _hostAddr   :: !InetAddr
     , _dataCentre :: !Text
     , _rack       :: !Text
-    } deriving (Eq, Ord)
+    }
+
+instance Eq Host where
+    a == b = _hostAddr a == _hostAddr b
+
+instance Ord Host where
+    compare a b = compare (_hostAddr a) (_hostAddr b)
 
 -- | A response that is known to originate from a specific
--- host of a cluster.
+-- 'Host' of a cluster.
 data HostResponse k a b = HostResponse
     { hrHost     :: !Host
     , hrResponse :: !(Response k a b)
@@ -61,7 +67,8 @@ instance ToBytes Host where
 -----------------------------------------------------------------------------
 -- InetAddr
 
-newtype InetAddr = InetAddr { sockAddr :: SockAddr } deriving (Eq, Ord)
+newtype InetAddr = InetAddr { sockAddr :: SockAddr }
+    deriving (Eq, Ord)
 
 instance Show InetAddr where
     show (InetAddr (SockAddrInet p a)) =
