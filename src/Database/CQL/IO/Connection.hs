@@ -40,7 +40,7 @@ import Control.Concurrent (myThreadId, forkIOWithUnmask)
 import Control.Concurrent.Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (throwTo, AsyncException (ThreadKilled))
+import Control.Exception (throwTo)
 import Control.Lens ((^.), makeLenses, view, set)
 import Control.Monad
 import Control.Monad.Catch
@@ -347,8 +347,8 @@ readLoop v g cset tck h sck syn sig sref wlck =
               ) `onException` Socket.close sck
 
     logException e = case fromException e of
-        Just ThreadKilled -> return ()
-        _                 -> warn g $ msg h ~~ msg (val "read-loop: " +++ show e)
+        Just AsyncCancelled -> return ()
+        _                   -> warn g $ msg h ~~ msg (val "read-loop: " +++ show e)
 
 readFrame :: Version -> Logger -> Host -> Socket -> Int -> IO Frame
 readFrame v g h s n = do
