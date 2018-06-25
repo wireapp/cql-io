@@ -1,3 +1,10 @@
+1.0.1
+------
+- Address an issue whereby Cassandra 'Error' responses might be mistakenly
+  thrown by the (internal) withRetries function, possibly leading to
+  problems with the automatic (re-)preparation of prepared queries upon
+  'Unprepared' server responses.
+
 1.0.0
 ------
 - Add support for CQL V4 binary protocol.
