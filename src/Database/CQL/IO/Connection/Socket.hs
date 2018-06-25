@@ -6,14 +6,20 @@
 {-# LANGUAGE CPP             #-}
 {-# LANGUAGE TemplateHaskell #-}
 
+-- | A thin wrapper of the Network.Socket API.
 module Database.CQL.IO.Connection.Socket
     ( Socket
-    , mkSock
+    , resolve
     , open
     , send
     , recv
     , close
     , shutdown
+
+    -- Re-exports
+    , HostName
+    , PortNumber
+    , ShutdownCmd (..)
     ) where
 
 import Control.Applicative
@@ -24,9 +30,11 @@ import Data.ByteString.Builder
 import Data.Maybe (isJust)
 import Data.Monoid
 import Database.CQL.IO.Cluster.Host
-import Database.CQL.IO.Types
+import Database.CQL.IO.Exception (ConnectionError (..))
+import Database.CQL.IO.Timeouts (Milliseconds (..))
 import Foreign.C.Types (CInt (..))
-import Network.Socket hiding (Stream, Socket, connect, close, recv, send, shutdown)
+import Network.Socket (HostName, PortNumber, SockAddr (..), ShutdownCmd (..))
+import Network.Socket (Family (..), AddrInfo (..), AddrInfoFlag (..))
 import Network.Socket.ByteString.Lazy (sendAll)
 import OpenSSL.Session (SSL, SSLContext)
 import System.Logger (ToBytes (..))
@@ -48,6 +56,13 @@ instance ToBytes Socket where
       where
         fd x = let CInt n = S.fdSocket x in n
 
+resolve :: HostName -> PortNumber -> IO [InetAddr]
+resolve h p = do
+    ais <- S.getAddrInfo (Just hints) (Just h) (Just (show p))
+    return $ map (InetAddr . addrAddress) ais
+  where
+    hints = S.defaultHints { addrFlags = [AI_ADDRCONFIG], addrSocketType = S.Stream }
+
 open :: Milliseconds -> InetAddr -> Maybe SSLContext -> IO Socket
 open to a ctx = do
     bracketOnError (mkSock a) S.close $ \s -> do
@@ -62,7 +77,7 @@ open to a ctx = do
                 return (Tls s c)
 
 mkSock :: InetAddr -> IO S.Socket
-mkSock (InetAddr a) = S.socket (familyOf a) S.Stream defaultProtocol
+mkSock (InetAddr a) = S.socket (familyOf a) S.Stream S.defaultProtocol
   where
     familyOf (SockAddrInet  _ _)     = AF_INET
     familyOf (SockAddrInet6 _ _ _ _) = AF_INET6
@@ -98,3 +113,5 @@ receive x i f n = toLazyByteString <$> go n mempty
 send :: Socket -> Lazy.ByteString -> IO ()
 send (Stream s) b = sendAll s b
 send (Tls _  c) b = mapM_ (SSL.write c) (Lazy.toChunks b)
+
+

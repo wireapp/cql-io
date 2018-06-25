@@ -16,7 +16,7 @@ import Control.Concurrent.STM
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
-import Database.CQL.IO.Types
+import Database.CQL.IO.Exception (ignore)
 import Data.Map.Strict (Map)
 import Data.Unique
 import Prelude

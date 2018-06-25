@@ -16,10 +16,10 @@ import Data.Time
 import Data.Word
 import Database.CQL.Protocol
 import Database.CQL.IO.Cluster.Policies (Policy, random)
+import Database.CQL.IO.Connection.Socket (PortNumber)
 import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.Pool as P
-import Database.CQL.IO.Types (Milliseconds (..))
-import Network.Socket (PortNumber (..))
+import Database.CQL.IO.Timeouts (Milliseconds (..))
 import OpenSSL.Session (SSLContext)
 import Prelude
 

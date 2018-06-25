@@ -2,42 +2,51 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-{-# LANGUAGE LambdaCase          #-}
-{-# LANGUAGE OverloadedStrings   #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TemplateHaskell     #-}
-{-# LANGUAGE ViewPatterns        #-}
+{-# LANGUAGE LambdaCase        #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE ViewPatterns      #-}
 
 module Database.CQL.IO.Connection
     ( Connection
     , ConnId
-    , resolve
-    , ping
-    , connect
-    , close
-    , request
-    , startup
-    , register
-    , query
-    , useKeyspace
+    , ident
     , host
-    , protocol
-    , eventSig
+
+    -- * Lifecycle
+    , connect
+    , canConnect
+    , close
+
+    -- * Requests
+    , request
+    , Raw
+    , requestRaw
+
+    -- ** Queries
+    , query
+    , defQueryParams
+
+    -- ** Events
+    , EventHandler
+    , allEventTypes
+    , register
+
+    -- * Re-exports
+    , Socket.resolve
     ) where
 
-import Control.Applicative
 import Control.Concurrent (myThreadId, forkIOWithUnmask)
 import Control.Concurrent.Async
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (throwTo, AsyncException (ThreadKilled))
-import Control.Lens ((^.), makeLenses, view)
+import Control.Lens ((^.), makeLenses, view, set)
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Data.ByteString.Lazy (ByteString)
-import Data.Int
-import Data.Maybe (fromMaybe)
+import Data.Foldable (for_)
 import Data.Monoid
 import Data.Text.Lazy (fromStrict)
 import Data.Unique
@@ -46,18 +55,14 @@ import Database.CQL.Protocol
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Connection.Socket (Socket)
 import Database.CQL.IO.Connection.Settings
+import Database.CQL.IO.Exception
 import Database.CQL.IO.Hexdump
 import Database.CQL.IO.Protocol
-import Database.CQL.IO.Signal hiding (connect)
+import Database.CQL.IO.Signal (Signal, signal, (|->), emit)
 import Database.CQL.IO.Sync (Sync)
-import Database.CQL.IO.Types
-import Database.CQL.IO.Tickets (Pool, toInt, markAvailable)
 import Database.CQL.IO.Timeouts (TimeoutManager, withTimeout)
-import Network.Socket hiding (Socket, close, connect, send)
 import System.IO (nativeNewline, Newline (..))
-import System.Logger hiding (Settings, close, defSettings, settings)
-import System.Timeout
-import Prelude
+import System.Logger (Logger, (+++), (.=), (~~), trace, warn, msg, val)
 
 import qualified Data.ByteString.Lazy              as L
 import qualified Data.ByteString.Lazy.Char8        as Char8
@@ -66,10 +71,13 @@ import qualified Data.Vector                       as Vector
 import qualified Database.CQL.IO.Connection.Socket as Socket
 import qualified Database.CQL.IO.Sync              as Sync
 import qualified Database.CQL.IO.Tickets           as Tickets
-import qualified Network.Socket                    as S
+import qualified System.Logger                     as Log
 
-type Streams = Vector (Sync (Header, ByteString))
+-- | The streams of a connection are a vector of slots, each
+-- containing the last received CQL protocol frame on that stream.
+type Streams = Vector (Sync Frame)
 
+-- | A connection to a 'Host' in a Cassandra cluster.
 data Connection = Connection
     { _settings :: !ConnectionSettings
     , _host     :: !Host
@@ -80,7 +88,7 @@ data Connection = Connection
     , _streams  :: !Streams
     , _wLock    :: !(MVar ())
     , _reader   :: !(Async ())
-    , _tickets  :: !Pool
+    , _tickets  :: !Tickets.Pool
     , _logger   :: !Logger
     , _eventSig :: !(Signal Event)
     , _ident    :: !ConnId
@@ -92,17 +100,15 @@ instance Eq Connection where
     a == b = a^.ident == b^.ident
 
 instance Show Connection where
-    show = Char8.unpack . eval . bytes
+    show = Char8.unpack . Log.eval . Log.bytes
 
-instance ToBytes Connection where
-    bytes c = bytes (c^.host) +++ val "#" +++ c^.sock
+instance Log.ToBytes Connection where
+    bytes c = Log.bytes (c^.host) +++ val "#" +++ c^.sock
 
-resolve :: HostName -> PortNumber -> IO [InetAddr]
-resolve h p =
-    map (InetAddr . addrAddress) <$> getAddrInfo (Just hints) (Just h) (Just (show p))
-  where
-    hints = defaultHints { addrFlags = [AI_ADDRCONFIG], addrSocketType = Stream }
+------------------------------------------------------------------------------
+-- Lifecycle
 
+-- | Establish and initialise a new connection to a Cassandra host.
 connect :: MonadIO m
     => ConnectionSettings
     -> TimeoutManager
@@ -111,73 +117,63 @@ connect :: MonadIO m
     -> Host
     -> m Connection
 connect t m v g h = liftIO $ do
-    let a = h^.hostAddr
-    c <- bracketOnError (Socket.open (t^.connectTimeout) a (t^.tlsContext)) Socket.close $ \s -> do
+    c <- bracketOnError sockOpen Socket.close $ \s -> do
         tck <- Tickets.pool (t^.maxStreams)
         syn <- Vector.replicateM (t^.maxStreams) Sync.create
         lck <- newMVar ()
         sta <- newTVarIO True
         sig <- signal
-        rdr <- async (readLoop v g t tck a s syn sig sta lck)
+        rdr <- async (readLoop v g t tck h s syn sig sta lck)
         Connection t h m v s sta syn lck rdr tck g sig . ConnId <$> newUnique
-    validateSettings c `onException` close c
+    initialise c
     return c
-
-ping :: MonadIO m => InetAddr -> m Bool
-ping a = liftIO $ bracket (Socket.mkSock a) S.close $ \s ->
-    fromMaybe False <$> timeout 5000000
-        ((S.connect s (sockAddr a) >> return True)
-            `catchAll` const (return False))
-
-readLoop :: Version
-         -> Logger
-         -> ConnectionSettings
-         -> Pool
-         -> InetAddr
-         -> Socket
-         -> Streams
-         -> Signal Event
-         -> TVar Bool
-         -> MVar ()
-         -> IO ()
-readLoop v g set tck i sck syn s sref wlck =
-    run `catch` logException `finally` cleanup
   where
-    run = forever $ do
-        x <- readSocket v g i sck (set^.maxRecvBuffer)
-        case fromStreamId $ streamId (fst x) of
-            -1 ->
-                case parse (set^.compression) x :: Raw Response of
-                    RsEvent _ _ e -> emit s e
-                    r             -> throwM (UnexpectedResponse' r)
-            sid -> do
-                ok <- Sync.put x (syn ! sid)
-                unless ok $
-                    markAvailable tck sid
+    sockOpen = Socket.open (t^.connectTimeout) (h^.hostAddr) (t^.tlsContext)
 
-    cleanup = uninterruptibleMask_ $ do
-        isOpen <- atomically $ swapTVar sref False
-        when isOpen $ do
-            Tickets.close (ConnectionClosed i) tck
-            Vector.mapM_ (Sync.close (ConnectionClosed i)) syn
-            void $ forkIOWithUnmask $ \unmask -> unmask $ do
-                Socket.shutdown sck ShutdownReceive
-                withMVar wlck (const $ Socket.close sck)
+    initialise c = do
+        validateSettings c
+        startup c
+        for_ (t^.defKeyspace) $
+            useKeyspace c
+      `onException`
+        close c
 
-    logException :: SomeException -> IO ()
-    logException e = case fromException e of
-        Just ThreadKilled -> return ()
-        _                 -> warn g $ msg i ~~ msg (val "read-loop: " +++ show e)
+    validateSettings c = do
+        Supported ca _ <- supportedOptions c
+        let x = algorithm (c^.settings.compression)
+        unless (x == None || x `elem` ca) $
+            throwM $ UnsupportedCompression x ca
 
+    supportedOptions c = do
+        let req = RqOptions Options
+        let c' = set (settings.compression) noCompression c
+        requestRaw c' req >>= \case
+            RsSupported _ _ x -> return x
+            rs                -> unhandled c rs
+
+-- | Check the connectivity of a Cassandra host on a new connection.
+canConnect :: MonadIO m => Host -> m Bool
+canConnect h = liftIO $ reachable `recover` False
+  where
+    reachable = bracket (Socket.open 5000 (h^.hostAddr) Nothing)
+                        Socket.close
+                        (const (return True))
+
+-- Note: The socket is closed when the 'readLoop' exits.
 close :: Connection -> IO ()
 close = cancel . view reader
 
-request :: Connection -> (Int -> ByteString) -> IO (Header, ByteString)
-request c f = send >>= receive
+------------------------------------------------------------------------------
+-- Low-level operations
+
+type Raw a = a () () ()
+
+request :: (Tuple a, Tuple b) => Connection -> Request k a b -> IO (Response k a b)
+request c rq = send >>= receive
   where
     send = withTimeout (c^.tmanager) (c^.settings.sendTimeout) (close c) $ do
-        i <- toInt <$> Tickets.get (c^.tickets)
-        let req = f i
+        i <- Tickets.toInt <$> Tickets.get (c^.tickets)
+        req <- serialise (c^.protocol) (c^.settings.compression) rq i
         trace (c^.logger) $ msg c
             ~~ "stream" .= i
             ~~ "type"   .= val "request"
@@ -191,51 +187,36 @@ request c f = send >>= receive
         return i
 
     receive i = do
-        let e = TimeoutRead (show c ++ ":" ++ show i)
+        let rt = ResponseTimeout (c^.host.hostAddr)
         tid <- myThreadId
-        withTimeout (c^.tmanager) (c^.settings.responseTimeout) (throwTo tid e) $ do
-            x <- Sync.get (view streams c ! i) `onException` Sync.kill e (view streams c ! i)
-            markAvailable (c^.tickets) i
-            return x
+        r <- withTimeout (c^.tmanager) (c^.settings.responseTimeout) (throwTo tid rt) $ do
+            r <- Sync.get (view streams c ! i)
+                `onException` Sync.kill rt (view streams c ! i)
+            Tickets.markAvailable (c^.tickets) i
+            return r
+        parse (c^.settings.compression) r
 
-readSocket :: Version -> Logger -> InetAddr -> Socket -> Int -> IO (Header, ByteString)
-readSocket v g i s n = do
-    b <- Socket.recv n i s 9
-    h <- case header v b of
-            Left  e -> throwM $ InternalError ("response header reading: " ++ e)
-            Right h -> return h
-    case headerType h of
-        RqHeader -> throwM $ InternalError "unexpected request header"
-        RsHeader -> do
-            let len = lengthRepr (bodyLength h)
-            x <- Socket.recv n i s (fromIntegral len)
-            trace g $ msg (i +++ val "#" +++ s)
-                ~~ "stream" .= fromStreamId (streamId h)
-                ~~ "type"   .= val "response"
-                ~~ msg' (hexdump $ L.take 160 (b <> x))
-            return (h, x)
+requestRaw :: Connection -> Raw Request -> IO (Raw Response)
+requestRaw = request
 
 -----------------------------------------------------------------------------
--- Operations
+-- High-level operations
 
 startup :: MonadIO m => Connection -> m ()
 startup c = liftIO $ do
     let cmp = c^.settings.compression
     let req = RqStartup (Startup Cqlv300 (algorithm cmp))
-    let enc = serialise (c^.protocol) cmp (req :: Raw Request)
-    res <- request c enc
-    case parse cmp res :: Raw Response of
+    requestRaw c req >>= \case
         RsReady _ _ Ready       -> checkAuth c
         RsAuthenticate _ _ auth -> authenticate c auth
-        RsError t w e           -> throwM (ResponseError (c^.host) t w e)
-        other                   -> throwM $ UnexpectedResponse' other
+        rs                      -> unhandled c rs
 
 checkAuth :: Connection -> IO ()
 checkAuth c = unless (null (c^.settings.authenticators)) $
     warn (_logger c) $ msg $ val
         "Authentication configured but none required by server."
 
-authenticate :: (MonadIO m, MonadThrow m) => Connection -> Authenticate -> m ()
+authenticate :: Connection -> Authenticate -> IO ()
 authenticate c (Authenticate (AuthMechanism -> m)) =
     case HashMap.lookup m (c^.settings.authenticators) of
         Nothing -> throwM $ AuthenticationRequired m
@@ -243,7 +224,7 @@ authenticate c (Authenticate (AuthMechanism -> m)) =
             authOnRequest   = onR
           , authOnChallenge = onC
           , authOnSuccess   = onS
-        } -> liftIO $ do
+        } -> do
             (rs, s) <- onR context
             case onC of
                 Just  f -> loop f onS (rs, s)
@@ -258,75 +239,142 @@ authenticate c (Authenticate (AuthMechanism -> m)) =
             (onC s >=> loop onC onS)
             (onS s)
 
-authResponse :: MonadIO m
-             => Connection
-             -> AuthResponse
-             -> m (Either AuthChallenge AuthSuccess)
+authResponse :: Connection -> AuthResponse -> IO (Either AuthChallenge AuthSuccess)
 authResponse c resp = liftIO $ do
-    let cmp = c^.settings.compression
     let req = RqAuthResp resp
-    let enc = serialise (c^.protocol) cmp (req :: Raw Request)
-    res <- request c enc
-    case parse cmp res :: Raw Response of
+    requestRaw c req >>= \case
         RsAuthSuccess _ _ success -> return $ Right success
         RsAuthChallenge _ _ chall -> return $ Left chall
-        RsError t w e             -> throwM (ResponseError (c^.host) t w e)
-        other                     -> throwM $ UnexpectedResponse' other
-
-register :: MonadIO m => Connection -> [EventType] -> EventHandler -> m ()
-register c e f = liftIO $ do
-    let req = RqRegister (Register e) :: Raw Request
-    let enc = serialise (c^.protocol) (c^.settings.compression) req
-    res <- request c enc
-    case parse (c^.settings.compression) res :: Raw Response of
-        RsReady _ _ Ready -> c^.eventSig |-> f
-        other             -> throwM (UnexpectedResponse' other)
-
-validateSettings :: MonadIO m => Connection -> m ()
-validateSettings c = liftIO $ do
-    Supported ca _ <- supportedOptions c
-    let x = algorithm (c^.settings.compression)
-    unless (x == None || x `elem` ca) $
-        throwM $ UnsupportedCompression ca
-
-supportedOptions :: MonadIO m => Connection -> m Supported
-supportedOptions c = liftIO $ do
-    let options = RqOptions Options :: Raw Request
-    res <- request c (serialise (c^.protocol) noCompression options)
-    case parse noCompression res :: Raw Response of
-        RsSupported _ _ x -> return x
-        other             -> throwM (UnexpectedResponse' other)
+        rs                        -> unhandled c rs
 
 useKeyspace :: MonadIO m => Connection -> Keyspace -> m ()
 useKeyspace c ks = liftIO $ do
-    let cmp    = c^.settings.compression
-        params = QueryParams One False () Nothing Nothing Nothing Nothing
+    let params = defQueryParams One ()
         kspace = quoted (fromStrict $ unKeyspace ks)
         req    = RqQuery (Query (QueryString $ "use " <> kspace) params)
-    res <- request c (serialise (c^.protocol) cmp req)
-    case parse cmp res :: Raw Response of
+    requestRaw c req >>= \case
         RsResult _ _ (SetKeyspaceResult _) -> return ()
-        other                              -> throwM (UnexpectedResponse' other)
+        rs                                 -> unhandled c rs
 
-query :: forall k a b m. (Tuple a, Tuple b, Show b, MonadIO m)
+------------------------------------------------------------------------------
+-- Queries
+
+query :: (Tuple a, Tuple b, MonadIO m)
       => Connection
       -> Consistency
       -> QueryString k a b
       -> a
       -> m [b]
 query c cons q p = liftIO $ do
-    let req = RqQuery (Query q params) :: Request k a b
-    let enc = serialise (c^.protocol) (c^.settings.compression) req
-    res <- request c enc
-    case parse (c^.settings.compression) res :: Response k a b of
+    let req = RqQuery (Query q (defQueryParams cons p))
+    request c req >>= \case
         RsResult _ _ (RowsResult _ b) -> return b
-        other                         -> throwM (UnexpectedResponse' other)
+        rs                            -> unhandled c rs
+
+-- | Construct default 'QueryParams' for the given consistency
+-- and bound values. In particular, no page size, paging state
+-- or serial consistency will be set.
+defQueryParams :: Consistency -> a -> QueryParams a
+defQueryParams c a = QueryParams
+    { consistency       = c
+    , values            = a
+    , skipMetaData      = False
+    , pageSize          = Nothing
+    , queryPagingState  = Nothing
+    , serialConsistency = Nothing
+    , enableTracing     = Nothing
+    }
+
+------------------------------------------------------------------------------
+-- Events
+
+type EventHandler = Event -> IO ()
+
+allEventTypes :: [EventType]
+allEventTypes = [TopologyChangeEvent, StatusChangeEvent, SchemaChangeEvent]
+
+register :: MonadIO m => Connection -> [EventType] -> EventHandler -> m ()
+register c ev f = liftIO $ do
+    let req = RqRegister (Register ev)
+    requestRaw c req >>= \case
+        RsReady _ _ Ready -> c^.eventSig |-> f
+        rs                -> unhandled c rs
+
+------------------------------------------------------------------------------
+-- Read loop
+
+-- Note: The read loop owns the socket given and is responsible
+-- for closing it, when it gets interrupted.
+readLoop :: Version
+         -> Logger
+         -> ConnectionSettings
+         -> Tickets.Pool
+         -> Host
+         -> Socket
+         -> Streams
+         -> Signal Event
+         -> TVar Bool
+         -> MVar ()
+         -> IO ()
+readLoop v g cset tck h sck syn sig sref wlck =
+    run `catch` logException `finally` cleanup
   where
-    params = QueryParams cons False p Nothing Nothing Nothing Nothing
+    run = forever $ do
+        f@(Frame hd _) <- readFrame v g h sck (cset^.maxRecvBuffer)
+        case fromStreamId (streamId hd) of
+            -1 -> do
+                r <- parse (cset^.compression) f :: IO (Raw Response)
+                case r of
+                    RsEvent _ _ e -> emit sig e
+                    _             -> throwM (UnexpectedResponse h r)
+            sid -> do
+                ok <- Sync.put f (syn ! sid)
+                unless ok $
+                    Tickets.markAvailable tck sid
 
--- logging helpers:
+    cleanup = uninterruptibleMask_ $ do
+        isOpen <- atomically $ swapTVar sref False
+        when isOpen $ do
+            let ex = ConnectionClosed (h^.hostAddr)
+            Tickets.close ex tck
+            Vector.mapM_ (Sync.close ex) syn
+            -- Try to shut down the socket gracefully, now allowing
+            -- interruptions (i.e. all exceptions) but make sure
+            -- the socket gets closed eventually.
+            void $ forkIOWithUnmask $ \unmask -> unmask (do
+                Socket.shutdown sck Socket.ShutdownReceive
+                withMVar wlck (const $ Socket.close sck)
+              ) `onException` Socket.close sck
 
-msg' :: ByteString -> Msg -> Msg
-msg' x = msg $ case nativeNewline of
-    LF   -> val "\n"   +++ x
-    CRLF -> val "\r\n" +++ x
+    logException e = case fromException e of
+        Just ThreadKilled -> return ()
+        _                 -> warn g $ msg h ~~ msg (val "read-loop: " +++ show e)
+
+readFrame :: Version -> Logger -> Host -> Socket -> Int -> IO Frame
+readFrame v g h s n = do
+    b <- Socket.recv n (h^.hostAddr) s 9
+    case header v b of
+       Left    e -> throwM $ ParseError ("response header reading: " ++ e)
+       Right hdr -> case headerType hdr of
+           RqHeader -> throwM $ ParseError "unexpected header"
+           RsHeader -> do
+               let len = lengthRepr (bodyLength hdr)
+               dat <- Socket.recv n (h^.hostAddr) s (fromIntegral len)
+               trace g $ msg (h +++ val "#" +++ s)
+                   ~~ "stream" .= fromStreamId (streamId hdr)
+                   ~~ "type"   .= val "response"
+                   ~~ msg' (hexdump $ L.take 160 (b <> dat))
+               return $ Frame hdr dat
+
+unhandled :: Connection -> Response k a b -> IO c
+unhandled c r = case r of
+    RsError t w e -> throwM (ResponseError (c^.host) t w e)
+    rs            -> unexpected c rs
+
+unexpected :: Connection -> Response k a b -> IO c
+unexpected c r = throwM $ UnexpectedResponse (c^.host) r
+
+msg' :: ByteString -> Log.Msg -> Log.Msg
+msg' x = Log.msg $ case nativeNewline of
+    LF   -> Log.val "\n"   +++ x
+    CRLF -> Log.val "\r\n" +++ x

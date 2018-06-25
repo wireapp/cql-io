@@ -27,7 +27,7 @@ import Data.Foldable (for_)
 import Data.Map.Strict (Map)
 import Data.String
 import Database.CQL.Protocol hiding (Map)
-import Database.CQL.IO.Types (HashCollision (..))
+import Database.CQL.IO.Exception (HashCollision (..))
 import Prelude
 
 import qualified Data.Map.Strict as M
