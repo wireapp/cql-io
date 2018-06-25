@@ -23,6 +23,7 @@ import Data.ByteString (ByteString)
 import Data.ByteString.Builder
 import Data.Maybe (isJust)
 import Data.Monoid
+import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Types
 import Foreign.C.Types (CInt (..))
 import Network.Socket hiding (Stream, Socket, connect, close, recv, send, shutdown)
