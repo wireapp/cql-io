@@ -23,6 +23,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Strict
 import Database.CQL.IO.Client
+import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.PrepQuery
 import Database.CQL.IO.Types
 import Database.CQL.Protocol
@@ -38,9 +39,9 @@ batch :: BatchM a -> Client ()
 batch m = do
     b <- execStateT (unBatchM m) (Batch BatchLogged [] Quorum Nothing)
     r <- executeWithPrepare Nothing (RqBatch b :: Raw Request)
-    getResult r >>= \case
+    getResult (hrResponse r) >>= \case
         VoidResult -> return ()
-        _          -> throwM $ UnexpectedResponse' r
+        _          -> throwM $ UnexpectedResponse (hrResponse r)
 
 -- | Add a query to this batch.
 addQuery :: (Show a, Tuple a, Tuple b) => QueryString W a b -> a -> BatchM ()

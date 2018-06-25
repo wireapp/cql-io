@@ -43,6 +43,7 @@ import Data.Text.Lazy (fromStrict)
 import Data.Unique
 import Data.Vector (Vector, (!))
 import Database.CQL.Protocol
+import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Connection.Socket (Socket)
 import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Hexdump
@@ -272,7 +273,7 @@ register c e f = liftIO $ do
     res <- request c enc
     case parse (c^.settings.compression) res :: Raw Response of
         RsReady _ _ Ready -> c^.eventSig |-> f
-        other           -> throwM (UnexpectedResponse' other)
+        other             -> throwM (UnexpectedResponse' other)
 
 validateSettings :: MonadIO m => Connection -> m ()
 validateSettings c = liftIO $ do
@@ -287,7 +288,7 @@ supportedOptions c = liftIO $ do
     res <- request c (serialise (c^.protocol) noCompression options)
     case parse noCompression res :: Raw Response of
         RsSupported _ _ x -> return x
-        other           -> throwM (UnexpectedResponse' other)
+        other             -> throwM (UnexpectedResponse' other)
 
 useKeyspace :: MonadIO m => Connection -> Keyspace -> m ()
 useKeyspace c ks = liftIO $ do
@@ -298,7 +299,7 @@ useKeyspace c ks = liftIO $ do
     res <- request c (serialise (c^.protocol) cmp req)
     case parse cmp res :: Raw Response of
         RsResult _ _ (SetKeyspaceResult _) -> return ()
-        other                            -> throwM (UnexpectedResponse' other)
+        other                              -> throwM (UnexpectedResponse' other)
 
 query :: forall k a b m. (Tuple a, Tuple b, Show b, MonadIO m)
       => Connection
@@ -312,7 +313,7 @@ query c cons q p = liftIO $ do
     res <- request c enc
     case parse (c^.settings.compression) res :: Response k a b of
         RsResult _ _ (RowsResult _ b) -> return b
-        other                       -> throwM (UnexpectedResponse' other)
+        other                         -> throwM (UnexpectedResponse' other)
   where
     params = QueryParams cons False p Nothing Nothing Nothing Nothing
 

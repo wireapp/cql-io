@@ -54,7 +54,7 @@ import Control.Monad.Trans.Control (MonadBaseControl (..))
 #if MIN_VERSION_transformers(0,4,0)
 import Control.Monad.Trans.Except
 #endif
-import Control.Retry (capDelay, exponentialBackoff, rsIterNumber, applyPolicy)
+import Control.Retry (capDelay, exponentialBackoff, rsIterNumber)
 import Control.Retry (recovering)
 import Data.Foldable (for_, foldrM)
 import Data.List (find)
@@ -235,12 +235,12 @@ withPrepareStrategy s = localState (set (context.settings.prepStrategy) s)
 request :: (MonadClient m, Tuple a, Tuple b) => Request k a b -> m (Response k a b)
 request a = liftClient $ do
     n <- liftIO . hostCount =<< view policy
-    snd <$> withRetries (requestN n) a
+    hrResponse <$> withRetries (requestN n) a
 
 -- | Invoke 'request1' up to @n@ times with different hosts if no
 -- connection is available. May return 'Nothing' if no connection
 -- is available on any of the tried hosts.
-requestN :: (Tuple b, Tuple a) => Word -> Request k a b -> ClientState -> Client (Maybe (Host, Response k a b))
+requestN :: (Tuple b, Tuple a) => Word -> Request k a b -> ClientState -> Client (Maybe (HostResponse k a b))
 requestN !n a s = do
     hst <- pickHost (s^.policy)
     res <- request1 hst a s
@@ -252,13 +252,13 @@ requestN !n a s = do
 
 -- | Get 'Response' from a single 'Host'.
 -- May return 'Nothing' if no connection is available.
-request1 :: (Tuple a, Tuple b) => Host -> Request k a b -> ClientState -> Client (Maybe (Host, Response k a b))
+request1 :: (Tuple a, Tuple b) => Host -> Request k a b -> ClientState -> Client (Maybe (HostResponse k a b))
 request1 h a s = do
     p <- Map.lookup h <$> readTVarIO' (s^.hostmap)
     case p of
         Just x -> do
             result <- with x transaction `catches` handlers
-            for_ result $ \(_, r) ->
+            for_ result $ \(HostResponse _ r) ->
                 for_ (Cql.warnings r) $ \w ->
                     warn $ msg (val "server warning: " +++ w)
             return result
@@ -272,7 +272,7 @@ request1 h a s = do
         let x = s^.context.settings.connSettings.compression
         let v = s^.context.settings.protoVersion
         r <- parse x <$> C.request c (serialise v x a)
-        r `seq` return (h, r)
+        r `seq` return (HostResponse h r)
 
     handlers =
         [ Handler $ \(e :: ConnectionError)  -> onConnectionError h e >> throwM e
@@ -283,11 +283,11 @@ request1 h a s = do
 -- | Execute the given request. If an 'Unprepared' error is returned, this
 -- function will automatically try to re-prepare the query and re-execute
 -- the original request using the same host which was used for re-preparation.
-executeWithPrepare :: (Tuple b, Tuple a) => Maybe Host -> Request k a b -> Client (Response k a b)
+executeWithPrepare :: (Tuple b, Tuple a) => Maybe Host -> Request k a b -> Client (HostResponse k a b)
 executeWithPrepare h q = do
     f <- selectAction h
     r <- withRetries f q
-    case snd r of
+    case hrResponse r of
         RsError _ _ (Unprepared _ i) -> do
             pq <- preparedQueries
             qs <- atomically' (PQ.lookupQueryString (QueryId i) pq)
@@ -296,8 +296,7 @@ executeWithPrepare h q = do
                 Just  s -> do
                     (g, _) <- prepare (Just LazyPrepare) (s :: Raw QueryString)
                     executeWithPrepare (Just g) q
-        RsError _ _ e -> throwM e
-        x -> return x
+        _ -> return r
   where
     selectAction Nothing  = view policy >>= liftIO . hostCount >>= return . requestN
     selectAction (Just x) = return (request1 x)
@@ -309,8 +308,8 @@ prepare :: (Tuple b, Tuple a) => Maybe PrepareStrategy -> QueryString k a b -> C
 prepare (Just LazyPrepare) qs = do
     s <- ask
     n <- liftIO $ hostCount (s^.policy)
-    (h, r) <- withRetries (requestN n) (RqPrepare (Prepare qs))
-    (h,) <$> getPreparedQueryId r
+    r <- withRetries (requestN n) (RqPrepare (Prepare qs))
+    getPreparedQueryId r
 
 prepare (Just EagerPrepare) qs = view policy
     >>= liftIO . current
@@ -318,8 +317,8 @@ prepare (Just EagerPrepare) qs = view policy
     >>= first
   where
     action rq h = do
-        r <- snd <$> withRetries (request1 h) rq
-        (h,) <$> getPreparedQueryId r
+        r <- withRetries (request1 h) rq
+        getPreparedQueryId r
 
     first (x:_) = return x
     first []    = throwM NoHostAvailable
@@ -334,7 +333,7 @@ execute q p = do
     pq <- view prepQueries
     maybe (new pq) (run Nothing) =<< atomically' (PQ.lookupQueryId q pq)
   where
-    run h i = executeWithPrepare h (RqExecute (Execute i p))
+    run h i = hrResponse <$> executeWithPrepare h (RqExecute (Execute i p))
     new pq  = do
         (h, i) <- prepare (Just LazyPrepare) (PQ.queryString q)
         atomically' (PQ.insert q i pq)
@@ -500,24 +499,31 @@ monitor ctx initial upperBound h = do
 -----------------------------------------------------------------------------
 -- Exception handling
 
+-- [Note: Error responses]
+-- Cassandra error responses are locally thrown as 'ResponseError's to achieve
+-- a unified handling of retries in the context of a single retry policy,
+-- together with other recoverable (i.e. retryable) exceptions. However, this
+-- is just an internal technicality for handling retries - generally error
+-- responses must not escape this function as exceptions. Deciding if and when
+-- to actually throw a 'ResponseError' upon inspection of the 'HostResponse'
+-- must be left to the caller.
 withRetries
     :: (Tuple a, Tuple b)
-    => (Request k a b -> ClientState -> Client (Maybe (Host, Response k a b)))
+    => (Request k a b -> ClientState -> Client (Maybe (HostResponse k a b)))
     -> Request k a b
-    -> Client (Host, Response k a b)
+    -> Client (HostResponse k a b)
 withRetries fn a = do
     s <- ask
     let p = s^.context.settings.retrySettings.retryPolicy
-    recovering p recoverFrom $ \i -> do
+    r <- try $ recovering p canRetry $ \i -> do
         r <- if rsIterNumber i == 0
                  then fn a s
                  else fn (newRequest s) (adjust s)
         case r of
             Nothing -> throwM HostsBusy
-            Just hr -> case snd hr of
-                RsError _ _ e -> applyPolicy p i
-                             >>= maybe (return hr) (const (throwM e))
-                _             -> return hr
+            -- [Note: Error responses]
+            Just hr -> maybe (return hr) throwM (toResponseError hr)
+    return $ either fromResponseError id r
   where
     adjust s =
         let x = s^.context.settings.retrySettings.sendTimeoutChange
@@ -536,14 +542,14 @@ withRetries fn a = do
                     RqBatch b               -> RqBatch b { batchConsistency = c }
                     _                       -> a
 
-    recoverFrom =
-        [ const $ Handler $ \e -> return $ case e of
-            ReadTimeout  {} -> True
-            WriteTimeout {} -> True
-            Overloaded   {} -> True
-            Unavailable  {} -> True
-            ServerError  {} -> True
-            _               -> False
+    canRetry =
+        [ const $ Handler $ \(e :: ResponseError) -> case reCause e of
+            ReadTimeout  {} -> return True
+            WriteTimeout {} -> return True
+            Overloaded   {} -> return True
+            Unavailable  {} -> return True
+            ServerError  {} -> return True
+            _               -> return False
         , const $ Handler $ \(_ :: ConnectionError)  -> return True
         , const $ Handler $ \(_ :: IOException)      -> return True
         , const $ Handler $ \(_ :: HostError)        -> return True
@@ -664,15 +670,15 @@ prepareAllQueries h = do
 getResult :: MonadThrow m => Response k a b -> m (Result k a b)
 getResult (RsResult _ _ r) = return r
 getResult (RsError  _ _ e) = throwM e
-getResult r                = throwM $ UnexpectedResponse r
+getResult hr               = throwM (UnexpectedResponse hr)
 {-# INLINE getResult #-}
 
-getPreparedQueryId :: MonadThrow m => Response k a b -> m (QueryId k a b)
-getPreparedQueryId r = do
-    rs <- getResult r
-    case rs of
-        PreparedResult i _ _ -> return i
-        _                    -> throwM $ UnexpectedResponse r
+getPreparedQueryId :: MonadThrow m => HostResponse k a b -> m (Host, QueryId k a b)
+getPreparedQueryId hr = do
+    r <- getResult (hrResponse hr)
+    case r of
+        PreparedResult i _ _ -> return (hrHost hr, i)
+        _                    -> throwM $ UnexpectedResponse (hrResponse hr)
 {-# INLINE getPreparedQueryId #-}
 
 peer2Host :: PortNumber -> Peer -> Host

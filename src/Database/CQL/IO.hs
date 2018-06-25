@@ -205,7 +205,10 @@ import qualified Database.CQL.IO.Batch as B
 
 -- | A type which can be run as a query.
 class RunQ q where
-    runQ :: (MonadClient m, Tuple a, Tuple b) => q k a b -> QueryParams a -> m (Response k a b)
+    runQ :: (MonadClient m, Tuple a, Tuple b)
+         => q k a b
+         -> QueryParams a
+         -> m (Response k a b)
 
 instance RunQ QueryString where
     runQ q p = request (RqQuery (Query q p))
@@ -259,7 +262,7 @@ trans q p = do
     r <- runQ q p
     getResult r >>= \case
         RowsResult _ b -> return b
-        _              -> throwM $ UnexpectedResponse' r
+        _              -> throwM $ UnexpectedResponse r
 
 -- | Run a CQL schema query, returning 'SchemaChange' information, if any.
 schema :: (MonadClient m, Tuple a, RunQ q) => q S a () -> QueryParams a -> m (Maybe SchemaChange)
