@@ -20,7 +20,7 @@ module Database.CQL.IO.Connection
     , register
     , query
     , useKeyspace
-    , address
+    , host
     , protocol
     , eventSig
     ) where
@@ -72,7 +72,7 @@ type Streams = Vector (Sync (Header, ByteString))
 
 data Connection = Connection
     { _settings :: !ConnectionSettings
-    , _address  :: !InetAddr
+    , _host     :: !Host
     , _tmanager :: !TimeoutManager
     , _protocol :: !Version
     , _sock     :: !Socket
@@ -95,16 +95,23 @@ instance Show Connection where
     show = Char8.unpack . eval . bytes
 
 instance ToBytes Connection where
-    bytes c = bytes (c^.address) +++ val "#" +++ c^.sock
+    bytes c = bytes (c^.host) +++ val "#" +++ c^.sock
 
-resolve :: String -> PortNumber -> IO [InetAddr]
-resolve host port =
-    map (InetAddr . addrAddress) <$> getAddrInfo (Just hints) (Just host) (Just (show port))
+resolve :: HostName -> PortNumber -> IO [InetAddr]
+resolve h p =
+    map (InetAddr . addrAddress) <$> getAddrInfo (Just hints) (Just h) (Just (show p))
   where
     hints = defaultHints { addrFlags = [AI_ADDRCONFIG], addrSocketType = Stream }
 
-connect :: MonadIO m => ConnectionSettings -> TimeoutManager -> Version -> Logger -> InetAddr -> m Connection
-connect t m v g a = liftIO $ do
+connect :: MonadIO m
+    => ConnectionSettings
+    -> TimeoutManager
+    -> Version
+    -> Logger
+    -> Host
+    -> m Connection
+connect t m v g h = liftIO $ do
+    let a = h^.hostAddr
     c <- bracketOnError (Socket.open (t^.connectTimeout) a (t^.tlsContext)) Socket.close $ \s -> do
         tck <- Tickets.pool (t^.maxStreams)
         syn <- Vector.replicateM (t^.maxStreams) Sync.create
@@ -112,14 +119,15 @@ connect t m v g a = liftIO $ do
         sta <- newTVarIO True
         sig <- signal
         rdr <- async (readLoop v g t tck a s syn sig sta lck)
-        Connection t a m v s sta syn lck rdr tck g sig . ConnId <$> newUnique
+        Connection t h m v s sta syn lck rdr tck g sig . ConnId <$> newUnique
     validateSettings c `onException` close c
     return c
 
 ping :: MonadIO m => InetAddr -> m Bool
 ping a = liftIO $ bracket (Socket.mkSock a) S.close $ \s ->
     fromMaybe False <$> timeout 5000000
-        ((S.connect s (sockAddr a) >> return True) `catchAll` const (return False))
+        ((S.connect s (sockAddr a) >> return True)
+            `catchAll` const (return False))
 
 readLoop :: Version
          -> Logger
@@ -140,7 +148,6 @@ readLoop v g set tck i sck syn s sref wlck =
         case fromStreamId $ streamId (fst x) of
             -1 ->
                 case parse (set^.compression) x :: Raw Response of
-                    RsError _ _ e -> throwM e
                     RsEvent _ _ e -> emit s e
                     r             -> throwM (UnexpectedResponse' r)
             sid -> do
@@ -180,7 +187,7 @@ request c f = send >>= receive
             if isOpen then
                 Socket.send (c^.sock) req
             else
-                throwM $ ConnectionClosed (c^.address)
+                throwM $ ConnectionClosed (c^.host.hostAddr)
         return i
 
     receive i = do
@@ -220,7 +227,7 @@ startup c = liftIO $ do
     case parse cmp res :: Raw Response of
         RsReady _ _ Ready       -> checkAuth c
         RsAuthenticate _ _ auth -> authenticate c auth
-        RsError _ _ e           -> throwM e
+        RsError t w e           -> throwM (ResponseError (c^.host) t w e)
         other                   -> throwM $ UnexpectedResponse' other
 
 checkAuth :: Connection -> IO ()
@@ -244,7 +251,7 @@ authenticate c (Authenticate (AuthMechanism -> m)) =
                     (throwM . UnexpectedAuthenticationChallenge m)
                     (onS s)
   where
-    context = AuthContext (c^.ident) (c^.address)
+    context = AuthContext (c^.ident) (c^.host.hostAddr)
 
     loop onC onS (rs, s) =
         authResponse c rs >>= either
@@ -261,10 +268,10 @@ authResponse c resp = liftIO $ do
     let enc = serialise (c^.protocol) cmp (req :: Raw Request)
     res <- request c enc
     case parse cmp res :: Raw Response of
-        RsAuthSuccess _ _ success     -> return $ Right success
-        RsAuthChallenge _ _ challenge -> return $ Left challenge
-        RsError _ _ e                 -> throwM e
-        other                         -> throwM $ UnexpectedResponse' other
+        RsAuthSuccess _ _ success -> return $ Right success
+        RsAuthChallenge _ _ chall -> return $ Left chall
+        RsError t w e             -> throwM (ResponseError (c^.host) t w e)
+        other                     -> throwM $ UnexpectedResponse' other
 
 register :: MonadIO m => Connection -> [EventType] -> EventHandler -> m ()
 register c e f = liftIO $ do

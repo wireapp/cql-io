@@ -28,9 +28,8 @@ data Policy = Policy
     { setup :: [Host] -> [Host] -> IO ()
       -- ^ Initialise the policy with two sets of hosts. The first
       -- parameter are hosts known to be available, the second are other
-      -- nodes.
-      -- Please note that a policy may be re-initialised at any point
-      -- through this method.
+      -- nodes. Note that a policy may be re-initialised at any point
+      -- through this function.
     , onEvent :: HostEvent -> IO ()
       -- ^ Event handler. Policies will be informed about cluster changes
       -- through this function.
