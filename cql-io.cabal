@@ -64,6 +64,7 @@ library
         Database.CQL.IO.Connection
         Database.CQL.IO.Connection.Socket
         Database.CQL.IO.Connection.Settings
+        Database.CQL.IO.Exception
         Database.CQL.IO.Hexdump
         Database.CQL.IO.Jobs
         Database.CQL.IO.Pool
@@ -74,10 +75,9 @@ library
         Database.CQL.IO.Sync
         Database.CQL.IO.Tickets
         Database.CQL.IO.Timeouts
-        Database.CQL.IO.Types
 
     build-depends:
-          async              >= 2.0
+          async              >= 2.2
         , auto-update        >= 0.1
         , base               >= 4.9   && < 5.0
         , bytestring         >= 0.10

@@ -2,24 +2,25 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
 module Database.CQL.IO.Timeouts
     ( TimeoutManager
+    , Milliseconds (..)
     , create
     , destroy
     , Action
-    , Milliseconds (..)
     , add
     , cancel
     , withTimeout
     ) where
 
-import Control.Applicative
 import Control.Concurrent.STM
 import Control.Exception (mask_, bracket)
 import Control.Reaper
 import Control.Monad
-import Database.CQL.IO.Types (Milliseconds (..), ignore)
-import Prelude
+import Database.CQL.IO.Exception (ignore)
+import Database.CQL.IO.Connection.Settings (Milliseconds (..))
 
 data TimeoutManager = TimeoutManager
     { roundtrip :: !Int

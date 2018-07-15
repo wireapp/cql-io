@@ -7,4 +7,5 @@ system-ghc: true
 
 extra-deps:
   - cql-4.0.1
+  - async-2.2.1
 

@@ -7,15 +7,16 @@
 
 module Database.CQL.IO.Cluster.Host where
 
-import Control.Lens ((^.), Lens')
+import Control.Lens (Lens')
 import Data.ByteString.Lazy.Char8 (unpack)
 import Database.CQL.Protocol (Response (..))
+import Database.CQL.IO.Cluster.Discovery
 import Data.IP
 import Data.Text (Text)
 import Network.Socket (SockAddr (..), PortNumber)
 import System.Logger.Message
 
--- | Host representation.
+-- | A Cassandra host known to the client.
 data Host = Host
     { _hostAddr   :: !InetAddr
     , _dataCentre :: !Text
@@ -28,8 +29,14 @@ instance Eq Host where
 instance Ord Host where
     compare a b = compare (_hostAddr a) (_hostAddr b)
 
--- | A response that is known to originate from a specific
--- 'Host' of a cluster.
+peer2Host :: PortNumber -> Peer -> Host
+peer2Host i p = Host (ip2inet i (peerRPC p)) (peerDC p) (peerRack p)
+
+updateHost :: Host -> Maybe (Text, Text) -> Host
+updateHost h (Just (dc, rk)) = h { _dataCentre = dc, _rack = rk }
+updateHost h Nothing         = h
+
+-- | A response that is known to originate from a specific 'Host'.
 data HostResponse k a b = HostResponse
     { hrHost     :: !Host
     , hrResponse :: !(Response k a b)
@@ -43,7 +50,7 @@ data HostEvent
     | HostUp   !InetAddr -- ^ a host has been started
     | HostDown !InetAddr -- ^ a host has been stopped
 
--- | The IP address and port number of this host.
+-- | The IP address and port number of a host.
 hostAddr :: Lens' Host InetAddr
 hostAddr f ~(Host a c r) = fmap (\x -> Host x c r) (f a)
 {-# INLINE hostAddr #-}
@@ -62,7 +69,9 @@ instance Show Host where
     show = unpack . eval . bytes
 
 instance ToBytes Host where
-    bytes h = h^.dataCentre +++ val ":" +++ h^.rack +++ val ":" +++ h^.hostAddr
+    bytes h = _dataCentre h +++ val ":"
+            +++ _rack h +++ val ":"
+            +++ _hostAddr h
 
 -----------------------------------------------------------------------------
 -- InetAddr
@@ -94,13 +103,14 @@ instance ToBytes InetAddr where
     bytes (InetAddr (SockAddrCan int32)) = bytes int32
 #endif
 
+-- | Map a 'SockAddr' into an 'InetAddr', using the given port number.
+sock2inet :: PortNumber -> SockAddr -> InetAddr
+sock2inet i (SockAddrInet _ a)      = InetAddr (SockAddrInet i a)
+sock2inet i (SockAddrInet6 _ f a b) = InetAddr (SockAddrInet6 i f a b)
+sock2inet _ unix                    = InetAddr unix
+
+-- | Map an 'IP' into an 'InetAddr', using the given port number.
 ip2inet :: PortNumber -> IP -> InetAddr
 ip2inet p (IPv4 a) = InetAddr $ SockAddrInet p (toHostAddress a)
 ip2inet p (IPv6 a) = InetAddr $ SockAddrInet6 p 0 (toHostAddress6 a) 0
-
-inet2ip :: InetAddr -> IP
-inet2ip (InetAddr (SockAddrInet _ a))      = IPv4 (fromHostAddress a)
-inet2ip (InetAddr (SockAddrInet6 _ _ a _)) = IPv6 (fromHostAddress6 a)
-inet2ip _                                  = error "inet2Ip: not IP4/IP6 address"
-
 

@@ -16,6 +16,7 @@ import Database.CQL.Protocol
 data Peer = Peer
     { peerAddr :: !IP
     , peerRPC  :: !IP
+        -- ^ The address for the client to connect to.
     , peerDC   :: !Text
     , peerRack :: !Text
     } deriving Show
