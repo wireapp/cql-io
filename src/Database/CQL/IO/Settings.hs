@@ -2,13 +2,18 @@
 -- License, v. 2.0. If a copy of the MPL was not distributed with this
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE RankNTypes        #-}
-{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE RecordWildCards     #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StrictData          #-}
+{-# LANGUAGE TemplateHaskell     #-}
 
 module Database.CQL.IO.Settings where
 
+import Control.Exception (IOException)
 import Control.Lens hiding ((<|))
+import Control.Monad.Catch
 import Control.Retry hiding (retryPolicy)
 import Data.List.NonEmpty (NonEmpty (..), (<|))
 import Data.Monoid
@@ -18,9 +23,10 @@ import Database.CQL.Protocol
 import Database.CQL.IO.Cluster.Policies (Policy, random)
 import Database.CQL.IO.Connection.Socket (PortNumber)
 import Database.CQL.IO.Connection.Settings as C
+import Database.CQL.IO.Exception
 import Database.CQL.IO.Pool as P
 import Database.CQL.IO.Timeouts (Milliseconds (..))
-import OpenSSL.Session (SSLContext)
+import OpenSSL.Session (SSLContext, SomeSSLException)
 import Prelude
 
 import qualified Data.HashMap.Strict as HashMap
@@ -31,21 +37,22 @@ data PrepareStrategy
     deriving (Eq, Ord, Show)
 
 data RetrySettings = RetrySettings
-    { _retryPolicy        :: !(forall m. Monad m => RetryPolicyM m)
-    , _reducedConsistency :: !(Maybe Consistency)
-    , _sendTimeoutChange  :: !Milliseconds
-    , _recvTimeoutChange  :: !Milliseconds
+    { _retryPolicy        :: forall m. Monad m => RetryPolicyM m
+    , _reducedConsistency :: (Maybe Consistency)
+    , _sendTimeoutChange  :: Milliseconds
+    , _recvTimeoutChange  :: Milliseconds
+    , _retryHandlers      :: forall m. Monad m => [RetryStatus -> Handler m Bool]
     }
 
 data Settings = Settings
-    { _poolSettings  :: !PoolSettings
-    , _connSettings  :: !ConnectionSettings
-    , _retrySettings :: !RetrySettings
-    , _protoVersion  :: !Version
-    , _portnumber    :: !PortNumber
-    , _contacts      :: !(NonEmpty String)
-    , _policyMaker   :: !(IO Policy)
-    , _prepStrategy  :: !PrepareStrategy
+    { _poolSettings  :: PoolSettings
+    , _connSettings  :: ConnectionSettings
+    , _retrySettings :: RetrySettings
+    , _protoVersion  :: Version
+    , _portnumber    :: PortNumber
+    , _contacts      :: NonEmpty String
+    , _policyMaker   :: IO Policy
+    , _prepStrategy  :: PrepareStrategy
     }
 
 makeLenses ''RetrySettings
@@ -81,7 +88,7 @@ defSettings :: Settings
 defSettings = Settings
     P.defSettings
     C.defSettings
-    noRetry
+    defRetrySettings
     V3
     9042
     ("localhost" :| [])
@@ -211,42 +218,69 @@ setAuthentication = set (connSettings.authenticators)
 
 -- | Never retry.
 noRetry :: RetrySettings
-noRetry = RetrySettings (RetryPolicyM $ const (return Nothing)) Nothing 0 0
+noRetry = RetrySettings
+    { _retryPolicy        = RetryPolicyM $ const (return Nothing)
+    , _reducedConsistency = Nothing
+    , _sendTimeoutChange  = 0
+    , _recvTimeoutChange  = 0
+    , _retryHandlers      = []
+    }
 
--- | Forever retry immediately.
-retryForever :: RetrySettings
-retryForever = RetrySettings mempty Nothing 0 0
+defRetrySettings :: RetrySettings
+defRetrySettings = RetrySettings
+    { _retryPolicy        = defRetryPolicy
+    , _reducedConsistency = Nothing
+    , _sendTimeoutChange  = 0
+    , _recvTimeoutChange  = 0
+    , _retryHandlers      = defRetryHandlers
+    }
 
--- | Limit number of retries.
-maxRetries :: Word -> RetrySettings -> RetrySettings
-maxRetries v s =
-    s { _retryPolicy = limitRetries (fromIntegral v) <> _retryPolicy s }
+defRetryPolicy :: RetryPolicy
+defRetryPolicy = limitRetries 1
+
+defRetryHandlers :: Monad m => [RetryStatus -> Handler m Bool]
+defRetryHandlers =
+    [ const $ Handler $ \(e :: ConnectionError) -> case e of
+        ConnectTimeout {} -> return True
+        _                 -> return False
+    , const $ Handler $ \(e :: ResponseError) -> return $ case reCause e of
+        Unavailable  {}   -> True
+        ReadTimeout  {..} -> rTimeoutNumAck >= rTimeoutNumRequired &&
+                             not rTimeoutDataPresent
+        WriteTimeout {..} -> wTimeoutWriteType == WriteBatchLog
+        _                 -> False
+    , const $ Handler $ \(_ :: HostError)        -> return True
+    , const $ Handler $ \(_ :: SomeSSLException) -> return True
+    ]
+
+eagerRetryHandlers :: Monad m => [RetryStatus -> Handler m Bool]
+eagerRetryHandlers =
+    [ const $ Handler $ \(e :: ResponseError) -> case reCause e of
+        ReadTimeout  {} -> return True
+        WriteTimeout {} -> return True
+        Overloaded   {} -> return True
+        Unavailable  {} -> return True
+        ServerError  {} -> return True
+        _               -> return False
+    , const $ Handler $ \(_ :: ConnectionError)  -> return True
+    , const $ Handler $ \(_ :: IOException)      -> return True
+    , const $ Handler $ \(_ :: HostError)        -> return True
+    , const $ Handler $ \(_ :: SomeSSLException) -> return True
+    ]
+
+-- | Set the 'RetryPolicy' to apply on retryable exceptions.
+setRetryPolicy :: RetryPolicy -> RetrySettings -> RetrySettings
+setRetryPolicy v s = s { _retryPolicy = v }
+
+-- | Set the retry handlers that decide whether an exception can be
+-- retried by the client.
+setRetryHandlers :: (forall m. Monad m => [RetryStatus -> Handler m Bool])
+    -> RetrySettings -> RetrySettings
+setRetryHandlers v s = s { _retryHandlers = v }
 
 -- | When retrying a (batch-) query, change consistency to the given value.
 adjustConsistency :: Consistency -> RetrySettings -> RetrySettings
 adjustConsistency v = set reducedConsistency (Just v)
-
--- | Wait a constant time between retries.
-constDelay :: NominalDiffTime -> RetrySettings -> RetrySettings
-constDelay v = setDelayFn constantDelay v v
-
--- | Delay retries with exponential backoff.
-expBackoff :: NominalDiffTime
-           -- ^ Initial delay.
-           -> NominalDiffTime
-           -- ^ Maximum delay.
-           -> RetrySettings
-           -> RetrySettings
-expBackoff = setDelayFn exponentialBackoff
-
--- | Delay retries using Fibonacci sequence as backoff.
-fibBackoff :: NominalDiffTime
-           -- ^ Initial delay.
-           -> NominalDiffTime
-           -- ^ Maximum delay.
-           -> RetrySettings
-           -> RetrySettings
-fibBackoff = setDelayFn fibonacciBackoff
 
 -- | On retry adjust the send timeout.
 adjustSendTimeout :: NominalDiffTime -> RetrySettings -> RetrySettings
@@ -256,13 +290,3 @@ adjustSendTimeout v = set sendTimeoutChange (Ms $ round (1000 * v))
 adjustResponseTimeout :: NominalDiffTime -> RetrySettings -> RetrySettings
 adjustResponseTimeout v = set recvTimeoutChange (Ms $ round (1000 * v))
 
-setDelayFn :: (Int -> RetryPolicy)
-           -> NominalDiffTime
-           -> NominalDiffTime
-           -> RetrySettings
-           -> RetrySettings
-setDelayFn f v w s =
-    let a = round (1000000 * w)
-        b = round (1000000 * v)
-    in
-        s { _retryPolicy = capDelay a (f b) <> _retryPolicy s }

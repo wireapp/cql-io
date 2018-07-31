@@ -94,12 +94,10 @@ module Database.CQL.IO
       -- ** Retry Settings
     , RetrySettings
     , noRetry
-    , retryForever
-    , maxRetries
+    , defRetrySettings
+    , defRetryPolicy
+    , defRetryHandlers
     , adjustConsistency
-    , constDelay
-    , expBackoff
-    , fibBackoff
     , adjustSendTimeout
     , adjustResponseTimeout
 

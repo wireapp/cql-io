@@ -505,8 +505,9 @@ withRetries
     -> Client (HostResponse k a b)
 withRetries fn a = do
     s <- ask
-    let p = s^.context.settings.retrySettings.retryPolicy
-    r <- try $ recovering p canRetry $ \i -> do
+    let how = s^.context.settings.retrySettings.retryPolicy
+    let what = s^.context.settings.retrySettings.retryHandlers
+    r <- try $ recovering how what $ \i -> do
         r <- if rsIterNumber i == 0
                  then fn a s
                  else fn (newRequest s) (adjust s)
@@ -532,20 +533,6 @@ withRetries fn a = do
                     RqExecute (Execute q p) -> RqExecute (Execute q p { consistency = c })
                     RqBatch b               -> RqBatch b { batchConsistency = c }
                     _                       -> a
-
-    canRetry =
-        [ const $ Handler $ \(e :: ResponseError) -> case reCause e of
-            ReadTimeout  {} -> return True
-            WriteTimeout {} -> return True
-            Overloaded   {} -> return True
-            Unavailable  {} -> return True
-            ServerError  {} -> return True
-            _               -> return False
-        , const $ Handler $ \(_ :: ConnectionError)  -> return True
-        , const $ Handler $ \(_ :: IOException)      -> return True
-        , const $ Handler $ \(_ :: HostError)        -> return True
-        , const $ Handler $ \(_ :: SomeSSLException) -> return True
-        ]
 
 onConnectionError :: Exception e => Host -> e -> Client ()
 onConnectionError h exc = do
