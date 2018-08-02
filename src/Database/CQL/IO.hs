@@ -94,9 +94,17 @@ module Database.CQL.IO
       -- ** Retry Settings
     , RetrySettings
     , noRetry
+      -- *** Default
     , defRetrySettings
     , defRetryPolicy
     , defRetryHandlers
+      -- *** Eager
+    , eagerRetrySettings
+    , eagerRetryPolicy
+    , eagerRetryHandlers
+      -- *** Configuration
+    , setRetryPolicy
+    , setRetryHandlers
     , adjustConsistency
     , adjustSendTimeout
     , adjustResponseTimeout
