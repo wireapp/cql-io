@@ -1,3 +1,8 @@
+1.1.0 (WIP)
+-----
+- Improve configuration of retry settings and refactor exceptions
+  (https://gitlab.com/twittner/cql-io/issues/13).
+
 1.0.1
 ------
 - Address an issue whereby Cassandra 'Error' responses might be mistakenly
