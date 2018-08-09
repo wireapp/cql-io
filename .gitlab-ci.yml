@@ -18,14 +18,14 @@ test:8.4:
   script:
     - apt -qq -y install build-essential libssl-dev > /dev/null
     - stack clean --full
-    - stack -j 1 --resolver nightly-2018-06-19 test --fast
+    - stack -j 1 --resolver lts-12.4 test --fast
 
 test:8.2:
   image: haskell:8.2
   script:
     - apt -qq -y install build-essential libssl-dev > /dev/null
     - stack clean --full
-    - stack -j 1 test --fast
+    - stack -j 1 --resolver lts-11.19 test --fast
 
 test:8.0:
   image: haskell:8.0
