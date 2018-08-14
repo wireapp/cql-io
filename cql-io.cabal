@@ -83,7 +83,7 @@ library
         , bytestring         >= 0.10
         , containers         >= 0.5
         , cql                >= 4.0
-        , cryptohash         >= 0.11
+        , cryptonite         >= 0.13
         , data-default-class
         , exceptions         >= 0.4
         , hashable           >= 1.2

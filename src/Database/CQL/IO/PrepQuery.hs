@@ -19,7 +19,8 @@ module Database.CQL.IO.PrepQuery
 import Control.Applicative
 import Control.Concurrent.STM
 import Control.Monad
-import Crypto.Hash.SHA1
+import Crypto.Hash
+import Crypto.Hash.Algorithms (SHA1)
 import Data.ByteString (ByteString)
 import Data.Text.Lazy (Text)
 import Data.Text.Lazy.Encoding (encodeUtf8)
@@ -45,7 +46,7 @@ data PrepQuery k a b = PrepQuery
 instance IsString (PrepQuery k a b) where
     fromString = prepared . fromString
 
-newtype PrepQueryId = PrepQueryId ByteString deriving (Eq, Ord)
+newtype PrepQueryId = PrepQueryId (Digest SHA1) deriving (Eq, Ord)
 
 prepared :: QueryString k a b -> PrepQuery k a b
 prepared q = PrepQuery q $ PrepQueryId (hashlazy . encodeUtf8 . unQueryString $ q)
