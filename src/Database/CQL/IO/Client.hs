@@ -637,6 +637,9 @@ prepareAllQueries h = do
 -----------------------------------------------------------------------------
 -- Utilities
 
+-- | Get the 'Result' out of a 'HostResponse'. If the response is an 'RsError',
+-- a 'ResponseError' is thrown. If the response is neither
+-- 'RsResult' nor 'RsError', an 'UnexpectedResponse' is thrown.
 getResult :: MonadThrow m => HostResponse k a b -> m (Result k a b)
 getResult (HostResponse _ (RsResult _ _ r)) = return r
 getResult (HostResponse h (RsError  t w e)) = throwM (ResponseError h t w e)

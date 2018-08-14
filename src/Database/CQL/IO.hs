@@ -182,6 +182,7 @@ module Database.CQL.IO
     , RunQ (..)
     , HostResponse (..)
     , request
+    , getResult
 
       -- * Exceptions
     , ProtocolError       (..)
