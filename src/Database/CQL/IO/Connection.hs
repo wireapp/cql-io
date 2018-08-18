@@ -47,7 +47,7 @@ import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Data.ByteString.Lazy (ByteString)
 import Data.Foldable (for_)
-import Data.Monoid
+import Data.Semigroup ((<>))
 import Data.Text.Lazy (fromStrict)
 import Data.Unique
 import Data.Vector (Vector, (!))

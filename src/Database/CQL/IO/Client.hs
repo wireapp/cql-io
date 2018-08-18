@@ -3,17 +3,12 @@
 -- file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 {-# LANGUAGE BangPatterns               #-}
-{-# LANGUAGE FlexibleContexts           #-}
-{-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE LambdaCase                 #-}
-{-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TemplateHaskell            #-}
 {-# LANGUAGE TupleSections              #-}
-{-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE UndecidableInstances       #-}
 {-# LANGUAGE ViewPatterns               #-}
 
 module Database.CQL.IO.Client
@@ -47,12 +42,11 @@ import Control.Concurrent.STM hiding (retry)
 import Control.Exception (IOException)
 import Control.Lens hiding ((.=), Context)
 import Control.Monad (void, when)
-import Control.Monad.Base (MonadBase (..))
 import Control.Monad.Catch
 import Control.Monad.IO.Class
+import Control.Monad.IO.Unlift
 import Control.Monad.Reader (ReaderT (..), runReaderT, MonadReader, ask)
 import Control.Monad.Trans.Class
-import Control.Monad.Trans.Control (MonadBaseControl (..))
 import Control.Monad.Trans.Except
 import Control.Retry (capDelay, exponentialBackoff, rsIterNumber)
 import Control.Retry (recovering)
@@ -125,7 +119,7 @@ makeLenses ''ClientState
 
 -- | The Client monad.
 --
--- A simple reader monad around some internal state. Prior to executing
+-- A simple reader monad on `IO` around some internal state. Prior to executing
 -- this monad via 'runClient', its state must be initialised through
 -- 'Database.CQL.IO.Client.init' and after finishing operation it should be
 -- terminated with 'shutdown'.
@@ -137,23 +131,18 @@ newtype Client a = Client
                , Applicative
                , Monad
                , MonadIO
+               , MonadUnliftIO
                , MonadThrow
-               , MonadMask
                , MonadCatch
+               , MonadMask
                , MonadReader ClientState
-               , MonadBase IO
                )
 
 instance MonadLogger Client where
     log l m = view (context.logger) >>= \g -> Logger.log g l m
 
-instance MonadBaseControl IO Client where
-    type StM Client a = StM (ReaderT ClientState IO) a
-    liftBaseWith f = Client $ liftBaseWith $ \run -> f (run . client)
-    restoreM = Client . restoreM
-
 -- | Monads in which 'Client' actions may be embedded.
-class (Functor m, Applicative m, Monad m, MonadIO m, MonadCatch m) => MonadClient m
+class (MonadIO m, MonadThrow m) => MonadClient m
   where
     -- | Lift a computation from the 'Client' monad.
     liftClient :: Client a -> m a
