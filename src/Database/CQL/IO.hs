@@ -24,32 +24,6 @@
 -- > shutdown c
 -- @
 --
---
--- __Note on prepared statements__
---
--- Prepared statements are fully supported but imply certain
--- complexities which lead to some assumptions beyond the scope
--- of the CQL binary protocol specification (spec):
---
--- (1) The spec scopes the 'QueryId' to the node the query has
---     been prepared with. The spec does not state anything
---     about the format of the 'QueryId', however it seems that
---     at least the official Java driver assumes that any given
---     'QueryString' yields the same 'QueryId' on every node.
---     We make the same assumption.
--- (2) In case a node does not know a given 'QueryId' an 'Unprepared'
---     error is returned. We assume that it is always safe to then
---     transparently re-prepare the corresponding 'QueryString' and
---     to re-execute the original request against the same node.
---
--- Besides these assumptions there is also a potential tradeoff in
--- regards to /eager/ vs. /lazy/ query preparation.
--- We understand /eager/ to mean preparation against all current nodes of
--- a cluster and /lazy/ to mean preparation against a single node if
--- required, i.e. after an 'Unprepared' error response. Which strategy to
--- choose depends on the scope of query reuse and the size of the cluster.
--- The global default can be changed through the 'Settings' module and per
--- action using 'withPrepareStrategy'.
 
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE LambdaCase    #-}
@@ -133,14 +107,16 @@ module Database.CQL.IO
     , debugInfo
 
       -- * Queries
+      -- $queries
     , R, W, S
     , QueryParams       (..)
     , defQueryParams
     , Consistency       (..)
     , SerialConsistency (..)
-    , QueryString       (..)
+    , Identity          (..)
 
       -- ** Basic Queries
+    , QueryString (..)
     , query
     , query1
     , write
@@ -175,10 +151,7 @@ module Database.CQL.IO
     , once
 
       -- ** Low-Level Queries
-      --
-      -- | Note: Use of these low-level functions may require additional imports from
-      -- @Database.CQL.Protocol@ or its submodules in order to construct
-      -- 'Request's and evaluate 'Response's.
+      -- $low-level-queries
     , RunQ (..)
     , HostResponse (..)
     , request
@@ -194,6 +167,7 @@ module Database.CQL.IO
     ) where
 
 import Control.Applicative
+import Data.Functor.Identity
 import Data.Maybe (isJust, listToMaybe)
 import Database.CQL.Protocol
 import Database.CQL.IO.Batch hiding (batch)
@@ -207,6 +181,64 @@ import Database.CQL.IO.Settings as S
 import Prelude hiding (init)
 
 import qualified Database.CQL.IO.Batch as B
+
+-- $queries
+--
+-- Queries are defined either as 'QueryString's or 'PrepQuery's.
+-- Both types carry three phantom type parameters used to describe
+-- the query, input and output types, respectively, as follows:
+--
+--   * @__k__@ is one of 'R'ead, 'W'rite or 'S'chema.
+--   * @__a__@ is the tuple type for the input, i.e. for the
+--     parameters bound by positional (@?@) or named (@:foo@) placeholders.
+--   * @__b__@ is the tuple type for the outputs, i.e. for the
+--     columns selected in a query.
+--
+-- Thereby every type used in an input or output tuple must be an instance
+-- of the 'Cql' typeclass. It is the responsibility of user code
+-- that the type ascription of a query matches the order, number and types of
+-- the parameters. For example:
+--
+-- @
+-- myQuery :: QueryString R (Identity UUID) (Text, Int, Maybe UTCTime)
+-- myQuery = "select name, age, birthday from user where id = ?"
+-- @
+--
+-- In this example, the query is declared as a 'R'ead with a single
+-- input (id) and three outputs (name, age and birthday).
+--
+-- Note that a single input or output type needs to be wrapped
+-- in the 'Identity' newtype, for which there is a `Cql` instance,
+-- in order to avoid overlapping instances.
+--
+-- It is a common strategy to use additional @newtype@s with derived
+-- @Cql@ instances for additional type safety, e.g.
+--
+-- @
+-- newtype UserId = UserId UUID deriving (Eq, Show, Cql)
+-- @
+--
+-- The input and output tuples can further be automatically
+-- converted from and to records via the 'Database.CQL.Protocol.Record'
+-- typeclass, whose instances can be generated via @TemplateHaskell@,
+-- if desired.
+--
+-- __Note on null values__
+--
+-- In principle, any column in Cassandra is /nullable/, i.e. may be
+-- be set to @null@ as a result of row operations. It is therefore
+-- important that any output type of a query that may be null
+-- is wrapped in the 'Maybe' type constructor.
+-- It is a common pitfall that a column is assumed to never contain
+-- null values, when in fact partial updates or deletions on a row,
+-- including via the use of TTLs, may result in null values and thus
+-- runtime errors when processing the responses.
+
+-- $low-level-queries
+--
+-- /Note/: Use of the these functions may require additional imports from
+-- @Database.CQL.Protocol@ or its submodules in order to construct
+-- 'Request's and evaluate 'Response's.
 
 -- | A type which can be run as a query.
 class RunQ q where

@@ -36,8 +36,47 @@ import qualified Data.Map.Strict as M
 -----------------------------------------------------------------------------
 -- Prepared Query
 
--- | Representation of a prepared query.
--- Actual preparation is handled transparently by the driver.
+-- | Representation of a prepared 'QueryString'. A prepared query is
+-- executed in two stages:
+--
+--   1. The query string is sent to a server without parameters for
+--      preparation. The server responds with a 'QueryId'.
+--   2. The prepared query is executed by sending the 'QueryId'
+--      and parameters to the server.
+--
+-- Thereby step 1 is only performed when the query has not yet been prepared
+-- with the host (coordinator) used for query execution. Thus, prepared
+-- queries enhance performance by avoiding the repeated sending and parsing
+-- of query strings.
+--
+-- Query preparation is handled transparently by the client.
+-- See 'Database.CQL.IO.setPrepareStrategy'.
+--
+-- __Note__
+--
+-- Prepared statements are fully supported but rely on some
+-- assumptions beyond the scope of the CQL binary protocol
+-- specification (spec):
+--
+-- (1) The spec scopes the 'QueryId' to the node the query has
+--     been prepared with. The spec does not state anything
+--     about the format of the 'QueryId'. However the official
+--     Java driver assumes that any given 'QueryString' yields
+--     the same 'QueryId' on every node. This client make the
+--     same assumption.
+-- (2) In case a node does not know a given 'QueryId' an 'Unprepared'
+--     error is returned. We assume that it is always safe to
+--     transparently re-prepare the corresponding 'QueryString' and
+--     to re-execute the original request against the same node.
+--
+-- Besides these assumptions there is also a potential tradeoff in
+-- regards to /eager/ vs. /lazy/ query preparation.
+-- We understand /eager/ to mean preparation against all current nodes of
+-- a cluster and /lazy/ to mean preparation against a single node on demand,
+-- i.e. upon receiving an 'Unprepared' error response. Which strategy to
+-- choose depends on the scope of query reuse and the size of the cluster.
+-- The global default can be changed through the 'Settings' module as well
+-- as locally using 'withPrepareStrategy'.
 data PrepQuery k a b = PrepQuery
     { pqStr :: !(QueryString k a b)
     , pqId  :: !PrepQueryId

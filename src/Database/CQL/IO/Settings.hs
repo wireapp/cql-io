@@ -39,6 +39,7 @@ data Settings = Settings
     , _prepStrategy  :: PrepareStrategy
     }
 
+-- | Strategy for the execution of 'PrepQuery's.
 data PrepareStrategy
     = EagerPrepare -- ^ cluster-wide preparation
     | LazyPrepare  -- ^ on-demand per node preparation
