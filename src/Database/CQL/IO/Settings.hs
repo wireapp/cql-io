@@ -25,6 +25,7 @@ import Prelude
 
 import qualified Data.HashMap.Strict as HashMap
 
+-- | Strategy for the execution of 'PrepQuery's.
 data PrepareStrategy
     = EagerPrepare -- ^ cluster-wide preparation
     | LazyPrepare  -- ^ on-demand per node preparation
