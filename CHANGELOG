@@ -2,6 +2,9 @@
 -----
 - Improve configuration of retry settings and refactor exceptions
   (https://gitlab.com/twittner/cql-io/issues/13).
+- Document and export the 'getResult' function alongside the low-level
+  query API.
+- Replace monad-control with unliftio.
 
 1.0.1
 ------
