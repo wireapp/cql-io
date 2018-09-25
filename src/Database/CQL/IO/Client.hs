@@ -15,7 +15,8 @@ module Database.CQL.IO.Client
     ( Client
     , MonadClient (..)
     , ClientState
-    , DebugInfo   (..)
+    , DebugInfo (..)
+    , ControlState (..)
     , runClient
     , init
     , shutdown
@@ -36,12 +37,13 @@ module Database.CQL.IO.Client
     ) where
 
 import Control.Applicative
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (threadDelay, forkIO)
 import Control.Concurrent.Async (async, wait)
-import Control.Concurrent.STM hiding (retry)
-import Control.Exception (IOException)
-import Control.Lens hiding ((.=), Context)
-import Control.Monad (void, when)
+import Control.Concurrent.STM (STM, atomically)
+import Control.Concurrent.STM.TVar
+import Control.Exception (IOException, SomeAsyncException (..))
+import Control.Lens (makeLenses, (^.), set, over, view)
+import Control.Monad (when, unless)
 import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Monad.IO.Unlift
@@ -86,9 +88,9 @@ import qualified Database.CQL.Protocol             as Cql
 import qualified System.Logger                     as Logger
 
 data ControlState
-    = Disconnected
-    | Connected
+    = Connected
     | Reconnecting
+    | Disconnected
     deriving (Eq, Ord, Show)
 
 data Control = Control
@@ -210,30 +212,50 @@ request a = liftClient $ do
     n <- liftIO . hostCount =<< view policy
     withRetries (requestN n) a
 
--- | Invoke 'request1' up to @n@ times with different hosts if no
--- connection is available. May return 'Nothing' if no connection
--- is available on any of the tried hosts.
+-- | Send a request to a host chosen by the configured host policy.
+--
+-- Tries up to @max(1,n)@ hosts. If no host can execute the request,
+-- a 'HostError' is thrown. Specifically:
+--
+--   * If no host is available from the 'Policy', 'NoHostAvailable' is thrown.
+--   * If no host can execute the request, e.g. because all streams
+--     on all connections are occupied, 'HostsBusy' is thrown.
 requestN :: (Tuple b, Tuple a)
     => Word
     -> Request k a b
     -> ClientState
-    -> Client (Maybe (HostResponse k a b))
+    -> Client (HostResponse k a b)
 requestN !n a s = liftIO (select (s^.policy)) >>= \case
-    Nothing -> throwM NoHostAvailable
-    Just  h -> request1 h a s >>= \case
-        Just hr -> return (Just hr)
-        Nothing -> if n > 0
+    Nothing -> replaceControl >> throwM NoHostAvailable
+    Just  h -> tryRequest1 h a s >>= \case
+        Just hr -> return hr
+        Nothing -> if n > 1
             then requestN (n - 1) a s
-            else return Nothing
+            else throwM HostsBusy
 
--- | Get 'Response' from a single 'Host'.
--- May return 'Nothing' if no connection is available.
+-- | Send a 'Request' to a specific 'Host'.
+--
+-- If the request cannot be executed on the given host, e.g.
+-- because all connections are occupied, 'HostsBusy' is thrown.
 request1 :: (Tuple a, Tuple b)
     => Host
     -> Request k a b
     -> ClientState
+    -> Client (HostResponse k a b)
+request1 h r s = do
+    rs <- tryRequest1 h r s
+    maybe (throwM HostsBusy) return rs
+
+-- | Try to send a 'Request' to a specific 'Host'.
+--
+-- If the request cannot be executed on the given host, e.g.
+-- because all connections are occupied, 'Nothing' is returned.
+tryRequest1 :: (Tuple a, Tuple b)
+    => Host
+    -> Request k a b
+    -> ClientState
     -> Client (Maybe (HostResponse k a b))
-request1 h a s = do
+tryRequest1 h a s = do
     pool <- Map.lookup h <$> readTVarIO' (s^.hostmap)
     case pool of
         Just p -> do
@@ -246,17 +268,37 @@ request1 h a s = do
             err $ msg (val "no pool for host " +++ h)
             p' <- mkPool (s^.context) h
             atomically' $ modifyTVar' (s^.hostmap) (Map.alter (maybe (Just p') Just) h)
-            request1 h a s
+            tryRequest1 h a s
   where
     exec c = do
         r <- C.request c a
         return $ HostResponse h r
 
     handlers =
-        [ Handler $ \(e :: ConnectionError)  -> onConnectionError h e >> throwM e
-        , Handler $ \(e :: IOException)      -> onConnectionError h e >> throwM e
-        , Handler $ \(e :: SomeSSLException) -> onConnectionError h e >> throwM e
+        [ Handler $ \(e :: ConnectionError)  -> onConnectionError e
+        , Handler $ \(e :: IOException)      -> onConnectionError e
+        , Handler $ \(e :: SomeSSLException) -> onConnectionError e
         ]
+
+    onConnectionError exc = do
+        warn $ "exception" .= show exc
+        -- Tell the policy that the host is down until monitoring confirms
+        -- it is still up, which will be signalled by a subsequent 'HostUp'
+        -- event.
+        e <- ask
+        liftIO $ ignore $ onEvent (e^.policy) (HostDown (h^.hostAddr))
+        Jobs.add (e^.jobs) (h^.hostAddr) True $
+            monitor (e^.context) 0 30000000 h
+        -- Any connection error may indicate a problem with the
+        -- control connection, if it uses the same host.
+        ch <- fmap (view (connection.host)) . readTVarIO' =<< view control
+        when (h == ch) $ do
+            ok <- checkControl
+            unless ok replaceControl
+        throwM exc
+
+------------------------------------------------------------------------------
+-- Prepared queries
 
 -- | Execute the given request. If an 'Unprepared' error is returned, this
 -- function will automatically try to re-prepare the query and re-execute
@@ -303,7 +345,7 @@ prepare (Just EagerPrepare) qs = view policy
     action rq h = withRetries (request1 h) rq >>= getPreparedQueryId
 
     first (x:_) = return x
-    first []    = throwM NoHostAvailable
+    first []    = replaceControl >> throwM NoHostAvailable
 
 prepare Nothing qs = do
     ps <- view (context.settings.prepStrategy)
@@ -321,10 +363,27 @@ execute q p = do
         atomically' (PQ.insert q i pq)
         exec (Just h) i
 
+prepareAllQueries :: Host -> Client ()
+prepareAllQueries h = do
+    pq <- view prepQueries
+    qs <- atomically' $ PQ.queryStrings pq
+    for_ qs $ \q ->
+        let qry = QueryString q :: Raw QueryString in
+        withRetries (request1 h) (RqPrepare (Prepare qry))
+
+------------------------------------------------------------------------------
+-- Debug info
+
 data DebugInfo = DebugInfo
-    { policyInfo :: String     -- ^ 'Policy' string representation
-    , jobInfo    :: [InetAddr] -- ^ hosts currently checked for reachability
-    , hostInfo   :: [Host]     -- ^ all known hosts
+    { policyInfo :: String
+        -- ^ Host 'Policy' string representation.
+    , jobInfo :: [InetAddr]
+        -- ^ Hosts with running background jobs (e.g. monitoring of hosts
+        -- currently considered down).
+    , hostInfo :: [Host]
+        -- ^ All known hosts.
+    , controlInfo :: (Host, ControlState)
+        -- ^ Control connection information.
     }
 
 instance Show DebugInfo where
@@ -334,6 +393,8 @@ instance Show DebugInfo where
              . shows (hostInfo dbg)
              . showString "\npolicy info: "
              . shows (policyInfo dbg)
+             . showString "\ncontrol host: "
+             . shows (controlInfo dbg)
              $ ""
 
 debugInfo :: MonadClient m => m DebugInfo
@@ -341,7 +402,8 @@ debugInfo = liftClient $ do
     hosts <- Map.keys <$> (readTVarIO' =<< view hostmap)
     pols  <- liftIO . display =<< view policy
     jbs   <- Jobs.showJobs =<< view jobs
-    return $ DebugInfo pols jbs hosts
+    ctrl  <- (\(Control s c) -> (c^.host, s)) <$> (readTVarIO' =<< view control)
+    return $ DebugInfo pols jbs hosts ctrl
 
 preparedQueries :: Client PreparedQueries
 preparedQueries = view prepQueries
@@ -353,73 +415,37 @@ preparedQueries = view prepQueries
 -- 'Logger' for all it's logging output.
 init :: MonadIO m => Logger -> Settings -> m ClientState
 init g s = liftIO $ do
-    t <- TM.create 250
-    c <- tryAll (s^.contacts) (mkConnection t)
-    e <- Context s g t <$> signal
-    p <- s^.policyMaker
-    x <- ClientState e
-            <$> pure p
-            <*> PQ.new
-            <*> newTVarIO (Control Connected c)
-            <*> newTVarIO Map.empty
-            <*> Jobs.new
-    e^.sigMonit |-> onEvent p
-    runClient x (setupControl c) `onException` liftIO (C.close c)
-    return x
+    tom <- TM.create 250
+    ctx <- Context s g tom <$> signal
+    bracketOnError (mkContact ctx) C.close $ \con -> do
+        pol <- s^.policyMaker
+        cst <- ClientState ctx
+                <$> pure pol
+                <*> PQ.new
+                <*> newTVarIO (Control Connected con)
+                <*> newTVarIO Map.empty
+                <*> Jobs.new
+        ctx^.sigMonit |-> onEvent pol
+        runClient cst (setupControl con)
+        return cst
+
+-- | Try to establish a connection to one of the initial contacts.
+mkContact :: Context -> IO Connection
+mkContact (Context s l t _) = tryAll (s^.contacts) mkConnection
   where
-    mkConnection t h = do
+    mkConnection h = do
         as <- C.resolve h (s^.portnumber)
-        NE.fromList as `tryAll` doConnect t
+        NE.fromList as `tryAll` doConnect
 
-    doConnect t a = do
-        Logger.debug g $ msg (val "connecting to " +++ a)
-        c <- C.connect (s^.connSettings) t (s^.protoVersion) g (Host a "" "")
+    doConnect a = do
+        Logger.debug l $ msg (val "connecting to " +++ a)
+        c <- C.connect (s^.connSettings) t (s^.protoVersion) l (Host a "" "")
         return c
-
--- | Setup and install the given connection as the new control
--- connection, replacing the current one.
-setupControl :: Connection -> Client ()
-setupControl c = do
-    env <- ask
-    pol <- view policy
-    ctx <- view context
-    l <- updateHost (c^.host) . listToMaybe <$> C.query c One Disco.local ()
-    r <- discoverPeers ctx c
-    (up, down) <- mkHostMap ctx pol (l:r)
-    m <- view hostmap
-    let h = Map.union up down
-    atomically' $ writeTVar m h
-    liftIO $ setup pol (Map.keys up) (Map.keys down)
-    C.register c C.allEventTypes (runClient env . onCqlEvent)
-    info $ msg (val "known hosts: " +++ show (Map.keys h))
-    j <- view jobs
-    for_ (Map.keys down) $ \d ->
-        Jobs.add j (d^.hostAddr) True $ monitor ctx 1000000 60000000 d
-    ctl <- view control
-    let c' = set C.host l c
-    atomically' $ writeTVar ctl (Control Connected c')
-    info $ msg (val "new control connection: " +++ c')
 
 discoverPeers :: MonadIO m => Context -> Connection -> m [Host]
 discoverPeers ctx c = liftIO $ do
     let p = ctx^.settings.portnumber
     map (peer2Host p . asRecord) <$> C.query c One Disco.peers ()
-
-mkHostMap :: Context -> Policy -> [Host] -> Client (Map Host Pool, Map Host Pool)
-mkHostMap c p = liftIO . foldrM checkHost (Map.empty, Map.empty)
-  where
-    checkHost h (up, down) = do
-        okay <- acceptable p h
-        if okay then do
-            isUp <- C.canConnect h
-            if isUp then do
-                up' <- Map.insert h <$> mkPool c h <*> pure up
-                return (up', down)
-            else do
-                down' <- Map.insert h <$> mkPool c h <*> pure down
-                return (up, down')
-        else
-            return (up, down)
 
 mkPool :: MonadIO m => Context -> Host -> m Pool
 mkPool ctx h = liftIO $ do
@@ -489,7 +515,7 @@ monitor ctx initial upperBound h = do
 -- must be left to the caller.
 withRetries
     :: (Tuple a, Tuple b)
-    => (Request k a b -> ClientState -> Client (Maybe (HostResponse k a b)))
+    => (Request k a b -> ClientState -> Client (HostResponse k a b))
     -> Request k a b
     -> Client (HostResponse k a b)
 withRetries fn a = do
@@ -497,13 +523,11 @@ withRetries fn a = do
     let how = s^.context.settings.retrySettings.retryPolicy
     let what = s^.context.settings.retrySettings.retryHandlers
     r <- try $ recovering how what $ \i -> do
-        r <- if rsIterNumber i == 0
+        hr <- if rsIterNumber i == 0
                  then fn a s
                  else fn (newRequest s) (adjust s)
-        case r of
-            Nothing -> throwM HostsBusy
-            -- [Note: Error responses]
-            Just hr -> maybe (return hr) throwM (toResponseError hr)
+        -- [Note: Error responses]
+        maybe (return hr) throwM (toResponseError hr)
     return $ either fromResponseError id r
   where
     adjust s =
@@ -523,54 +547,153 @@ withRetries fn a = do
                     RqBatch b               -> RqBatch b { batchConsistency = c }
                     _                       -> a
 
-onConnectionError :: Exception e => Host -> e -> Client ()
-onConnectionError h exc = do
-    warn $ "exception" .= show exc
-    e <- ask
-    c <- atomically' $ do
-        ctrl <- readTVar (e^.control)
-        if ctrl^.state == Connected && ctrl^.connection.host == h then do
-            writeTVar (e^.control) (set state Reconnecting ctrl)
-            return $ Just (ctrl^.connection)
-        else
-            return Nothing
-    liftIO $ maybe
-        (ignore . onEvent (e^.policy) $ HostDown (h^.hostAddr))
-        (void . async . recovering adInf canRetry . const . continue e)
-        c
-    Jobs.add (e^.jobs) (h^.hostAddr) True $
-        monitor (e^.context) 0 30000000 h
+------------------------------------------------------------------------------
+-- Control connection handling
+--
+-- The control connection is dedicated to maintaining the client's
+-- view of the cluster topology. There is a single control connection in a
+-- client's 'ClientState' at any particular time.
+
+-- | Setup and install the given connection as the new control
+-- connection, replacing the current one.
+setupControl :: Connection -> Client ()
+setupControl c = do
+    env <- ask
+    pol <- view policy
+    ctx <- view context
+    l <- updateHost (c^.host) . listToMaybe <$> C.query c One Disco.local ()
+    r <- discoverPeers ctx c
+    (up, down) <- mkHostMap ctx pol (l:r)
+    m <- view hostmap
+    let h = Map.union up down
+    atomically' $ writeTVar m h
+    liftIO $ setup pol (Map.keys up) (Map.keys down)
+    C.register c C.allEventTypes (runClient env . onCqlEvent)
+    info $ msg (val "known hosts: " +++ show (Map.keys h))
+    j <- view jobs
+    for_ (Map.keys down) $ \d ->
+        Jobs.add j (d^.hostAddr) True $ monitor ctx 1000000 60000000 d
+    ctl <- view control
+    let c' = set C.host l c
+    atomically' $ writeTVar ctl (Control Connected c')
+    info $ msg (val "new control connection: " +++ c')
+
+-- | Initialise connection pools for the given hosts, checking for
+-- acceptability with the host policy and separating them by reachability.
+mkHostMap :: Context -> Policy -> [Host] -> Client (Map Host Pool, Map Host Pool)
+mkHostMap c p = liftIO . foldrM checkHost (Map.empty, Map.empty)
   where
-    continue e conn = do
-        Jobs.destroy (e^.jobs)
-        ignore $ C.close conn
-        ignore $ onEvent (e^.policy) (HostDown (h^.hostAddr))
+    checkHost h (up, down) = do
+        okay <- acceptable p h
+        if okay then do
+            isUp <- C.canConnect h
+            if isUp then do
+                up' <- Map.insert h <$> mkPool c h <*> pure up
+                return (up', down)
+            else do
+                down' <- Map.insert h <$> mkPool c h <*> pure down
+                return (up, down')
+        else
+            return (up, down)
+
+-- | Check if the control connection is healthy.
+checkControl :: Client Bool
+checkControl = do
+    cc <- view connection <$> (readTVarIO' =<< view control)
+    rs <- liftIO $ C.requestRaw cc (RqOptions Options)
+    return $ case rs of
+        RsSupported {} -> True
+        _              -> False
+  `recover`
+    False
+
+-- | Asynchronously replace the control connection.
+--
+-- Invariants:
+--
+--   1) When the control connection is in state 'Reconnecting' there
+--      is a thread running that attempts to establish a new control
+--      connection.
+--
+--   2) There is only one thread performing a reconnect at a time.
+--
+-- To that end, the 'ControlState' acts as a mutex that is acquired
+-- in state 'Reconnecting' and must eventually be released by either
+-- a successful reconnect with state 'Connected' or a (fatal) failure
+-- with state 'Disconnected'. In the latter case, further failing
+-- requests may trigger another recovery attempt of the control
+-- connection.
+replaceControl :: Client ()
+replaceControl = do
+    e <- ask
+    let l = e^.context.logger
+    liftIO $ mask $ \restore -> do
+        cc <- setReconnecting e
+        for_ cc $ \c -> forkIO $
+            restore $ do
+                ignore (C.close c)
+                reconnect e l
+              `catchAll` \ex -> do
+                Logger.fatal l $ msg $
+                    val "Control connection reconnect aborted: " +++ show ex
+                atomically $ modifyTVar' (e^.control) (set state Disconnected)
+  where
+    setReconnecting e = atomically $ do
+        ctrl <- readTVar (e^.control)
+        if ctrl^.state /= Reconnecting
+            then do
+                writeTVar (e^.control) (set state Reconnecting ctrl)
+                return $ Just (ctrl^.connection)
+            else
+                return Nothing
+
+    reconnect e l = recovering adInf (onExc l) $ \_ -> do
         hosts <- NE.nonEmpty . Map.keys <$> readTVarIO (e^.hostmap)
         case hosts of
-            Just hs -> hs `tryAll` (runClient e . renewControl) `onException` reconnect e hs
+            Just hs -> hs `tryAll` (runClient e . renewControl)
+                `catch` \x -> case fromException x of
+                    Just (SomeAsyncException _) -> throwM x
+                    Nothing                     -> do
+                        Logger.err l $ msg $ val "All known hosts unreachable."
+                        runClient e rebootControl
             Nothing -> do
-                atomically $ modifyTVar' (e^.control) (set state Disconnected)
-                Logger.fatal (e^.context.logger) $ "error-handler" .= val "no host available"
-
-    reconnect e hosts = do
-        Logger.info (e^.context.logger) $ msg (val "reconnecting control ...")
-        hosts `tryAll` (runClient e . renewControl)
+                Logger.err l $ msg $ val "No known hosts."
+                runClient e rebootControl
 
     adInf = capDelay 5000000 (exponentialBackoff 5000)
 
-    canRetry =
-        [ const (Handler $ \(_ :: IOException)      -> return True)
-        , const (Handler $ \(_ :: ConnectionError)  -> return True)
-        , const (Handler $ \(_ :: HostError)        -> return True)
-        , const (Handler $ \(_ :: SomeSSLException) -> return True)
+    onExc l =
+        [ const $ Handler $ \(_ :: SomeAsyncException) -> return False
+        , const $ Handler $ \(e :: SomeException)      -> do
+            Logger.err l $ msg $ val
+                "Replacement of control connection failed with: "
+                +++ show e +++
+                val ". Retrying ..."
+            return True
         ]
 
+-- | Create a new connection to a known host and set it up
+-- as the new control connection.
 renewControl :: Host -> Client ()
 renewControl h = do
+    info $ msg (val "Renewing control connection with known host ...")
     ctx <- view context
     let s = ctx^.settings
-    c <- C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) (ctx^.logger) h
-    setupControl c `onException` liftIO (C.close c)
+    bracketOnError
+        (C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) (ctx^.logger) h)
+        (liftIO . C.close)
+        setupControl
+
+-- | Create a new connection to one of the initial contacts
+-- and set it up as the new control connection.
+rebootControl :: Client ()
+rebootControl = do
+    e <- ask
+    info $ msg $ val "Renewing control connection with initial contacts ..."
+    bracketOnError
+        (liftIO (mkContact (e^.context)))
+        (liftIO . C.close)
+        setupControl
 
 -----------------------------------------------------------------------------
 -- Event handling
@@ -587,7 +710,7 @@ onCqlEvent x = do
             hmap <- view hostmap
             atomically' $
                 modifyTVar' hmap (Map.filterWithKey (\h _ -> h^.hostAddr /= a))
-            liftIO $ onEvent pol $ HostGone a
+            liftIO $ onEvent pol (HostGone a)
         StatusEvent Up (sock2inet prt -> a) -> do
             s <- ask
             startMonitor s a
@@ -614,14 +737,6 @@ onCqlEvent x = do
                 monitor (s^.context) 3000000 60000000 h
                 runClient s (prepareAllQueries h)
             Nothing -> return ()
-
-prepareAllQueries :: Host -> Client ()
-prepareAllQueries h = do
-    pq <- view prepQueries
-    qs <- atomically' $ PQ.queryStrings pq
-    for_ qs $ \q ->
-        let qry = QueryString q :: Raw QueryString in
-        withRetries (request1 h) (RqPrepare (Prepare qry))
 
 -----------------------------------------------------------------------------
 -- Utilities
