@@ -237,8 +237,8 @@ noRetry :: RetrySettings
 noRetry = RetrySettings
     { _retryPolicy        = RetryPolicyM $ const (return Nothing)
     , _reducedConsistency = Nothing
-    , _sendTimeoutChange  = 0
-    , _recvTimeoutChange  = 0
+    , _sendTimeoutChange  = Ms 0
+    , _recvTimeoutChange  = Ms 0
     , _retryHandlers      = []
     }
 
@@ -248,8 +248,8 @@ defRetrySettings :: RetrySettings
 defRetrySettings = RetrySettings
     { _retryPolicy        = defRetryPolicy
     , _reducedConsistency = Nothing
-    , _sendTimeoutChange  = 0
-    , _recvTimeoutChange  = 0
+    , _sendTimeoutChange  = Ms 0
+    , _recvTimeoutChange  = Ms 0
     , _retryHandlers      = defRetryHandlers
     }
 
@@ -260,8 +260,8 @@ eagerRetrySettings :: RetrySettings
 eagerRetrySettings = RetrySettings
     { _retryPolicy        = eagerRetryPolicy
     , _reducedConsistency = Nothing
-    , _sendTimeoutChange  = 0
-    , _recvTimeoutChange  = 0
+    , _sendTimeoutChange  = Ms 0
+    , _recvTimeoutChange  = Ms 0
     , _retryHandlers      = eagerRetryHandlers
     }
 

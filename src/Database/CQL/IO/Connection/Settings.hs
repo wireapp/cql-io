@@ -54,7 +54,7 @@ import qualified Data.Text.Lazy             as Lazy
 import qualified Data.Text.Lazy.Encoding    as Lazy
 
 newtype Milliseconds = Ms { ms :: Int }
-    deriving (Eq, Show, Num)
+    deriving (Eq, Show)
 
 newtype ConnId = ConnId Unique deriving (Eq, Ord)
 
@@ -151,9 +151,9 @@ passwordAuthenticator (AuthUser u) (AuthPass p) = Authenticator
 
 defSettings :: ConnectionSettings
 defSettings =
-    ConnectionSettings 5000          -- connect timeout
-                       3000          -- send timeout
-                       10000         -- response timeout
+    ConnectionSettings (Ms 5000)     -- connect timeout
+                       (Ms 3000)     -- send timeout
+                       (Ms 10000)    -- response timeout
                        128           -- max streams per connection
                        noCompression -- compression
                        Nothing       -- keyspace

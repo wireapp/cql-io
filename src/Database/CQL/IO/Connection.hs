@@ -155,7 +155,7 @@ connect t m v g h = liftIO $ do
 canConnect :: MonadIO m => Host -> m Bool
 canConnect h = liftIO $ reachable `recover` False
   where
-    reachable = bracket (Socket.open 5000 (h^.hostAddr) Nothing)
+    reachable = bracket (Socket.open (Ms 5000) (h^.hostAddr) Nothing)
                         Socket.close
                         (const (return True))
 
