@@ -62,7 +62,7 @@ import Database.CQL.IO.Cluster.Policies
 import Database.CQL.IO.Connection (Connection, host, Raw)
 import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Exception
-import Database.CQL.IO.Jobs (Jobs)
+import Database.CQL.IO.Jobs
 import Database.CQL.IO.Pool (Pool)
 import Database.CQL.IO.PrepQuery (PrepQuery, PreparedQueries)
 import Database.CQL.IO.Settings
@@ -80,7 +80,6 @@ import qualified Data.List.NonEmpty                as NE
 import qualified Data.Map.Strict                   as Map
 import qualified Database.CQL.IO.Cluster.Discovery as Disco
 import qualified Database.CQL.IO.Connection        as C
-import qualified Database.CQL.IO.Jobs              as Jobs
 import qualified Database.CQL.IO.Pool              as Pool
 import qualified Database.CQL.IO.PrepQuery         as PQ
 import qualified Database.CQL.IO.Timeouts          as TM
@@ -287,7 +286,7 @@ tryRequest1 h a s = do
         -- event.
         e <- ask
         liftIO $ ignore $ onEvent (e^.policy) (HostDown (h^.hostAddr))
-        Jobs.add (e^.jobs) (h^.hostAddr) True $
+        runJob_ (e^.jobs) (h^.hostAddr) $
             runClient e $ monitor (Ms 0) (Ms 30000) h
         -- Any connection error may indicate a problem with the
         -- control connection, if it uses the same host.
@@ -401,7 +400,7 @@ debugInfo :: MonadClient m => m DebugInfo
 debugInfo = liftClient $ do
     hosts <- Map.keys <$> (readTVarIO' =<< view hostmap)
     pols  <- liftIO . display =<< view policy
-    jbs   <- Jobs.showJobs =<< view jobs
+    jbs   <- listJobKeys =<< view jobs
     ctrl  <- (\(Control s c) -> (c^.host, s)) <$> (readTVarIO' =<< view control)
     return $ DebugInfo pols jbs hosts ctrl
 
@@ -424,7 +423,7 @@ init g s = liftIO $ do
                 <*> PQ.new
                 <*> newTVarIO (Control Connected con)
                 <*> newTVarIO Map.empty
-                <*> Jobs.new
+                <*> newJobs
         ctx^.sigMonit |-> onEvent pol
         runClient cst (setupControl con)
         return cst
@@ -475,7 +474,7 @@ shutdown s = liftIO $ asyncShutdown >>= wait
   where
     asyncShutdown = async $ do
         TM.destroy (s^.context.timeouts) True
-        Jobs.destroy (s^.jobs)
+        cancelJobs (s^.jobs)
         ignore $ C.close . view connection =<< readTVarIO (s^.control)
         mapM_ Pool.destroy . Map.elems =<< readTVarIO (s^.hostmap)
 
@@ -597,7 +596,7 @@ setupControl c = do
     info $ msg (val "known hosts: " +++ show (Map.keys h))
     j <- view jobs
     for_ (Map.keys down) $ \d ->
-        Jobs.add j (d^.hostAddr) True $
+        runJob j (d^.hostAddr) $
             runClient env $ monitor (Ms 1000) (Ms 60000) d
     ctl <- view control
     let c' = set C.host l c
@@ -753,13 +752,13 @@ onCqlEvent x = do
                 p <- mkPool ctx h
                 atomically' $ modifyTVar' hmap (Map.alter (maybe (Just p) Just) h)
                 liftIO $ onEvent pol (HostNew h)
-                Jobs.add (s^.jobs) a False $ runClient s (prepareAllQueries h)
+                tryRunJob_ (s^.jobs) a $ runClient s (prepareAllQueries h)
         SchemaEvent _ -> return ()
   where
     startMonitor s a = do
         hmp <- readTVarIO' (s^.hostmap)
         case find ((a ==) . view hostAddr) (Map.keys hmp) of
-            Just h -> Jobs.add (s^.jobs) a False $ runClient s $ do
+            Just h -> tryRunJob_ (s^.jobs) a $ runClient s $ do
                 monitor (Ms 3000) (Ms 60000) h
                 prepareAllQueries h
             Nothing -> return ()
