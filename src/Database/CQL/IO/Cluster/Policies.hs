@@ -44,7 +44,7 @@ data Policy = Policy
       -- policy if a dicovered host should be ignored.
     , hostCount :: IO Word
       -- ^ During query processing, the driver will ask the policy for
-      -- a rough esitimate of alive hosts. The number is used to repeatedly
+      -- a rough estimate of alive hosts. The number is used to repeatedly
       -- invoke 'select' (with the underlying assumption that the policy
       -- returns mostly different hosts).
     , display :: IO String

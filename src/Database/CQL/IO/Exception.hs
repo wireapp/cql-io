@@ -216,31 +216,31 @@ instance Show AuthenticationError where
 -----------------------------------------------------------------------------
 -- Utilities
 
--- | Recover from all (synchronous) exceptions raised by an 'IO'
+-- | Recover from all (synchronous) exceptions raised by a
 -- computation with a fixed value.
-recover :: forall a. IO a -> a -> IO a
+recover :: forall m a. MonadCatch m => m a -> a -> m a
 recover io val = try io >>= either fallback return
   where
-    fallback :: SomeException -> IO a
+    fallback :: SomeException -> m a
     fallback e = case fromException e of
         Just (SomeAsyncException _) -> throwM e
         Nothing                     -> return val
 {-# INLINE recover #-}
 
--- | Ignore all (synchronous) exceptions raised by an 'IO'
+-- | Ignore all (synchronous) exceptions raised by a
 -- computation that produces no result, i.e. is only run for
 -- its (side-)effects.
-ignore :: IO () -> IO ()
+ignore :: MonadCatch m => m () -> m ()
 ignore io = recover io ()
 {-# INLINE ignore #-}
 
--- | Try an 'IO' computation on a non-empty list of values, recovering
+-- | Try a computation on a non-empty list of values, recovering
 -- from (synchronous) exceptions for all but the last value.
-tryAll :: forall a b. NonEmpty a -> (a -> IO b) -> IO b
+tryAll :: forall m a b. MonadCatch m => NonEmpty a -> (a -> m b) -> m b
 tryAll (a :| []) f = f a
 tryAll (a :| aa) f = try (f a) >>= either next return
   where
-    next :: SomeException -> IO b
+    next :: SomeException -> m b
     next e = case fromException e of
         Just (SomeAsyncException _) -> throwM e
         Nothing                     -> tryAll (NonEmpty.fromList aa) f
