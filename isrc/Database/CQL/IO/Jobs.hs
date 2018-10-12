@@ -17,6 +17,7 @@ module Database.CQL.IO.Jobs
 
 import Control.Concurrent
 import Control.Concurrent.Async
+import Control.Exception (asyncExceptionFromException, asyncExceptionToException)
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
@@ -39,10 +40,12 @@ data Job = Job
     , jobAsync :: !(Async ())
     }
 
--- | The exception used to cancel a job if it is replaced by
--- another job.
+-- | The asynchronous exception used to cancel a job if it is replaced
+-- by another job.
 data JobReplaced = JobReplaced deriving (Eq, Show, Typeable)
-instance Exception JobReplaced
+instance Exception JobReplaced where
+    toException   = asyncExceptionToException
+    fromException = asyncExceptionFromException
 
 newJobs :: MonadIO m => m (Jobs k)
 newJobs = liftIO $ Jobs <$> newIORef Map.empty
