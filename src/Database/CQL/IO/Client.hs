@@ -288,7 +288,7 @@ tryRequest1 h a s = do
         e <- ask
         liftIO $ ignore $ onEvent (e^.policy) (HostDown (h^.hostAddr))
         Jobs.add (e^.jobs) (h^.hostAddr) True $
-            monitor (e^.context) 0 30000000 h
+            runClient e $ monitor (Ms 0) (Ms 30000) h
         -- Any connection error may indicate a problem with the
         -- control connection, if it uses the same host.
         ch <- fmap (view (connection.host)) . readTVarIO' =<< view control
@@ -415,7 +415,7 @@ preparedQueries = view prepQueries
 -- 'Logger' for all it's logging output.
 init :: MonadIO m => Logger -> Settings -> m ClientState
 init g s = liftIO $ do
-    tom <- TM.create 250
+    tom <- TM.create (Ms 250)
     ctx <- Context s g tom <$> signal
     bracketOnError (mkContact ctx) C.close $ \con -> do
         pol <- s^.policyMaker
@@ -482,25 +482,50 @@ shutdown s = liftIO $ asyncShutdown >>= wait
 -----------------------------------------------------------------------------
 -- Monitoring
 
-monitor :: Context -> Int -> Int -> Host -> IO ()
-monitor ctx initial upperBound h = do
-    threadDelay initial
-    Logger.info (ctx^.logger) $ msg (val "monitoring: " +++ h)
-    hostCheck 0 maxN
+-- | @monitor initialDelay maxDelay host@ tries to establish a connection
+-- to @host@ after @initialDelay@. If the connection attempt fails, it is
+-- retried with exponentially increasing delays, up to a maximum delay of
+-- @maxDelay@. When a connection attempt suceeds, a 'HostUp' event is
+-- signalled.
+--
+-- The function returns when one of the following conditions is met:
+--
+--   1. The connection attempt suceeds.
+--   2. The host is no longer found to be in the client's known host map.
+--
+-- I.e. as long as the host is still known to the client and is unreachable, the
+-- connection attempts continue. Both @initialDelay@ and @maxDelay@ are bounded
+-- by a limit of 5 minutes.
+monitor :: Milliseconds -> Milliseconds -> Host -> Client ()
+monitor initial maxDelay h = do
+    liftIO $ threadDelay (toMicros initial)
+    info $ msg (val "monitoring: " +++ h)
+    hostCheck 0
   where
-    hostCheck :: Int -> Int -> IO ()
-    hostCheck n mx = do
-        threadDelay (2^(min n mx) * 50000)
-        isUp <- C.canConnect h
-        if isUp then do
-            ctx^.sigMonit $$ HostUp (h^.hostAddr)
-            Logger.info (ctx^.logger) $ msg (val "reachable: " +++ h)
-        else do
-            Logger.info (ctx^.logger) $ msg (val "unreachable: " +++ h)
-            hostCheck (n + 1) mx
+    hostCheck :: Int -> Client ()
+    hostCheck !n = do
+        hosts <- liftIO . readTVarIO =<< view hostmap
+        when (Map.member h hosts) $ do
+            isUp <- C.canConnect h
+            if isUp then do
+                sig <- view (context.sigMonit)
+                liftIO $ sig $$ (HostUp (h^.hostAddr))
+                info $ msg (val "reachable: " +++ h)
+            else do
+                info $ msg (val "unreachable: " +++ h)
+                liftIO $ threadDelay (2^n * minDelay)
+                hostCheck (min (n + 1) maxExp)
 
-    maxN :: Int
-    maxN = floor . logBase 2 $ (fromIntegral (upperBound `div` 50000) :: Double)
+    -- Bounded to 5min
+    toMicros :: Milliseconds -> Int
+    toMicros (Ms s) = min (s * 1000) (5 * 60 * 1000000)
+
+    minDelay :: Int
+    minDelay = 50000 -- 50ms
+
+    maxExp :: Int
+    maxExp = let steps = fromIntegral (toMicros maxDelay `div` minDelay) :: Double
+              in floor (logBase 2 steps)
 
 -----------------------------------------------------------------------------
 -- Exception handling
@@ -531,10 +556,10 @@ withRetries fn a = do
     return $ either fromResponseError id r
   where
     adjust s =
-        let x = s^.context.settings.retrySettings.sendTimeoutChange
-            y = s^.context.settings.retrySettings.recvTimeoutChange
-        in over (context.settings.connSettings.sendTimeout)     (+ x)
-         . over (context.settings.connSettings.responseTimeout) (+ y)
+        let Ms x = s^.context.settings.retrySettings.sendTimeoutChange
+            Ms y = s^.context.settings.retrySettings.recvTimeoutChange
+        in over (context.settings.connSettings.sendTimeout)     (Ms . (+ x) . ms)
+         . over (context.settings.connSettings.responseTimeout) (Ms . (+ y) . ms)
          $ s
 
     newRequest s =
@@ -572,7 +597,8 @@ setupControl c = do
     info $ msg (val "known hosts: " +++ show (Map.keys h))
     j <- view jobs
     for_ (Map.keys down) $ \d ->
-        Jobs.add j (d^.hostAddr) True $ monitor ctx 1000000 60000000 d
+        Jobs.add j (d^.hostAddr) True $
+            runClient env $ monitor (Ms 1000) (Ms 60000) d
     ctl <- view control
     let c' = set C.host l c
     atomically' $ writeTVar ctl (Control Connected c')
@@ -733,9 +759,9 @@ onCqlEvent x = do
     startMonitor s a = do
         hmp <- readTVarIO' (s^.hostmap)
         case find ((a ==) . view hostAddr) (Map.keys hmp) of
-            Just h -> Jobs.add (s^.jobs) a False $ do
-                monitor (s^.context) 3000000 60000000 h
-                runClient s (prepareAllQueries h)
+            Just h -> Jobs.add (s^.jobs) a False $ runClient s $ do
+                monitor (Ms 3000) (Ms 60000) h
+                prepareAllQueries h
             Nothing -> return ()
 
 -----------------------------------------------------------------------------
