@@ -5,6 +5,9 @@
 - Document and export the 'getResult' function alongside the low-level
   query API.
 - Replace monad-control with unliftio.
+- Remove dependency on tinylog, introducing a minimal logging interface that can
+  be hooked up to any logging library. Tinylog integration has moved to
+  the new cql-io-tinylog library.
 
 1.0.1
 ------

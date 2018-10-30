@@ -8,13 +8,11 @@
 module Database.CQL.IO.Cluster.Host where
 
 import Control.Lens (Lens')
-import Data.ByteString.Lazy.Char8 (unpack)
 import Database.CQL.Protocol (Response (..))
 import Database.CQL.IO.Cluster.Discovery
 import Data.IP
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Network.Socket (SockAddr (..), PortNumber)
-import System.Logger.Message
 
 -- | A Cassandra host known to the client.
 data Host = Host
@@ -66,12 +64,12 @@ rack f ~(Host a c r) = fmap (\x -> Host a c x) (f r)
 {-# INLINE rack #-}
 
 instance Show Host where
-    show = unpack . eval . bytes
-
-instance ToBytes Host where
-    bytes h = _dataCentre h +++ val ":"
-            +++ _rack h +++ val ":"
-            +++ _hostAddr h
+    show h = showString (unpack (_dataCentre h))
+           . showString ":"
+           . showString (unpack (_rack h))
+           . showString ":"
+           . shows (_hostAddr h)
+           $ ""
 
 -----------------------------------------------------------------------------
 -- InetAddr
@@ -89,18 +87,6 @@ instance Show InetAddr where
     show (InetAddr (SockAddrUnix unix)) = unix
 #if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
     show (InetAddr (SockAddrCan int32)) = show int32
-#endif
-
-instance ToBytes InetAddr where
-    bytes (InetAddr (SockAddrInet p a)) =
-        let i = fromIntegral p :: Int in
-        show (fromHostAddress a) +++ val ":" +++ i
-    bytes (InetAddr (SockAddrInet6 p _ a _)) =
-        let i = fromIntegral p :: Int in
-        show (fromHostAddress6 a) +++ val ":" +++ i
-    bytes (InetAddr (SockAddrUnix unix)) = bytes unix
-#if MIN_VERSION_network(2,6,1) && !MIN_VERSION_network(3,0,0)
-    bytes (InetAddr (SockAddrCan int32)) = bytes int32
 #endif
 
 -- | Map a 'SockAddr' into an 'InetAddr', using the given port number.

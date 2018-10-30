@@ -35,11 +35,12 @@ import Data.Function (on)
 import Data.Hashable
 import Data.IORef
 import Data.Sequence (Seq, ViewL (..), (|>), (><))
+import Data.Semigroup ((<>))
 import Data.Time.Clock (UTCTime, NominalDiffTime, getCurrentTime, diffUTCTime)
 import Data.Vector (Vector, (!))
 import Database.CQL.IO.Connection (Connection)
 import Database.CQL.IO.Exception (ConnectionError (..), ignore)
-import System.Logger hiding (create, defSettings, settings)
+import Database.CQL.IO.Log
 
 import qualified Data.Sequence as Seq
 import qualified Data.Vector   as Vec
@@ -135,7 +136,7 @@ cleanup p s r x = do
     onTimeout =
         if timeouts r > p^.settings.maxTimeouts
             then do
-                info (p^.logger) $ msg (show (value r) +++ val " has too many timeouts.")
+                logInfo (p^.logger) $ string8 (show (value r)) <> ": Too many timeouts."
                 destroyR p s r
             else put p s r incrTimeouts
 
@@ -205,7 +206,7 @@ reaper p = forever $ do
                     modifyTVar' (inUse s) (subtract (Seq.length stale))
                 return stale
         forM_ x $ \v -> ignore $ do
-            trace (p^.logger) $ "reap" .= show (value v)
+            logDebug (p^.logger) $ "Reaping idle connection: " <> string8 (show (value v))
             p^.destroyFn $ (value v)
 
 stripe :: Pool -> IO Stripe
