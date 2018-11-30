@@ -56,6 +56,8 @@ import Data.Foldable (for_, foldrM)
 import Data.List (find)
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Semigroup
+import Data.Text.Encoding (encodeUtf8)
 import Data.Word
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
@@ -63,6 +65,7 @@ import Database.CQL.IO.Connection (Connection, host, Raw)
 import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Exception
 import Database.CQL.IO.Jobs
+import Database.CQL.IO.Log
 import Database.CQL.IO.Pool (Pool)
 import Database.CQL.IO.PrepQuery (PrepQuery, PreparedQueries)
 import Database.CQL.IO.Settings
@@ -70,7 +73,6 @@ import Database.CQL.IO.Signal
 import Database.CQL.IO.Timeouts (TimeoutManager)
 import Database.CQL.Protocol hiding (Map)
 import OpenSSL.Session (SomeSSLException)
-import System.Logger.Class hiding (Settings, new, settings, create)
 import Prelude hiding (init)
 
 import qualified Control.Monad.Reader              as Reader
@@ -84,7 +86,6 @@ import qualified Database.CQL.IO.Pool              as Pool
 import qualified Database.CQL.IO.PrepQuery         as PQ
 import qualified Database.CQL.IO.Timeouts          as TM
 import qualified Database.CQL.Protocol             as Cql
-import qualified System.Logger                     as Logger
 
 data ControlState
     = Connected
@@ -98,10 +99,9 @@ data Control = Control
     }
 
 data Context = Context
-    { _settings      :: !Settings
-    , _logger        :: !Logger
-    , _timeouts      :: !TimeoutManager
-    , _sigMonit      :: !(Signal HostEvent)
+    { _settings :: !Settings
+    , _timeouts :: !TimeoutManager
+    , _sigMonit :: !(Signal HostEvent)
     }
 
 -- | Opaque client state/environment.
@@ -138,9 +138,6 @@ newtype Client a = Client
                , MonadMask
                , MonadReader ClientState
                )
-
-instance MonadLogger Client where
-    log l m = view (context.logger) >>= \g -> Logger.log g l m
 
 -- | Monads in which 'Client' actions may be embedded.
 class (MonadIO m, MonadThrow m) => MonadClient m
@@ -261,10 +258,10 @@ tryRequest1 h a s = do
             result <- Pool.with p exec `catches` handlers
             for_ result $ \(HostResponse _ r) ->
                 for_ (Cql.warnings r) $ \w ->
-                    warn $ msg (val "server warning: " +++ w)
+                    logWarn' $ "Server warning: " <> byteString (encodeUtf8 w)
             return result
         Nothing -> do
-            err $ msg (val "no pool for host " +++ h)
+            logError' $ "No pool for host: " <> string8 (show h)
             p' <- mkPool (s^.context) h
             atomically' $ modifyTVar' (s^.hostmap) (Map.alter (maybe (Just p') Just) h)
             tryRequest1 h a s
@@ -280,11 +277,11 @@ tryRequest1 h a s = do
         ]
 
     onConnectionError exc = do
-        warn $ "exception" .= show exc
+        e <- ask
+        logWarn' (string8 (show exc))
         -- Tell the policy that the host is down until monitoring confirms
         -- it is still up, which will be signalled by a subsequent 'HostUp'
         -- event.
-        e <- ask
         liftIO $ ignore $ onEvent (e^.policy) (HostDown (h^.hostAddr))
         runJob_ (e^.jobs) (h^.hostAddr) $
             runClient e $ monitor (Ms 0) (Ms 30000) h
@@ -412,10 +409,10 @@ preparedQueries = view prepQueries
 
 -- | Initialise client state with the given 'Settings' using the provided
 -- 'Logger' for all it's logging output.
-init :: MonadIO m => Logger -> Settings -> m ClientState
-init g s = liftIO $ do
+init :: MonadIO m => Settings -> m ClientState
+init s = liftIO $ do
     tom <- TM.create (Ms 250)
-    ctx <- Context s g tom <$> signal
+    ctx <- Context s tom <$> signal
     bracketOnError (mkContact ctx) C.close $ \con -> do
         pol <- s^.policyMaker
         cst <- ClientState ctx
@@ -430,15 +427,15 @@ init g s = liftIO $ do
 
 -- | Try to establish a connection to one of the initial contacts.
 mkContact :: Context -> IO Connection
-mkContact (Context s l t _) = tryAll (s^.contacts) mkConnection
+mkContact (Context s t _) = tryAll (s^.contacts) mkConnection
   where
     mkConnection h = do
         as <- C.resolve h (s^.portnumber)
         NE.fromList as `tryAll` doConnect
 
     doConnect a = do
-        Logger.debug l $ msg (val "connecting to " +++ a)
-        c <- C.connect (s^.connSettings) t (s^.protoVersion) l (Host a "" "")
+        logDebug (s^.logger) $ "Connecting to " <> string8 (show a)
+        c <- C.connect (s^.connSettings) t (s^.protoVersion) (s^.logger) (Host a "" "")
         return c
 
 discoverPeers :: MonadIO m => Context -> Connection -> m [Host]
@@ -450,17 +447,18 @@ mkPool :: MonadIO m => Context -> Host -> m Pool
 mkPool ctx h = liftIO $ do
     let s = ctx^.settings
     let m = s^.connSettings.maxStreams
-    Pool.create (connOpen s) connClose (ctx^.logger) (s^.poolSettings) m
+    Pool.create (connOpen s) connClose (ctx^.settings.logger) (s^.poolSettings) m
   where
+    lgr = ctx^.settings.logger
+
     connOpen s = do
-        let g = ctx^.logger
-        c <- C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) g h
-        Logger.debug g $ "client.connect" .= c
+        c <- C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) lgr h
+        logDebug lgr $ "Connection established: " <> string8 (show c)
         return c
 
-    connClose con = do
-        Logger.debug (ctx^.logger) $ "client.close" .= con
-        C.close con
+    connClose c = do
+        C.close c
+        logDebug lgr $ "Connection closed: " <> string8 (show c)
 
 -----------------------------------------------------------------------------
 -- Termination
@@ -498,7 +496,7 @@ shutdown s = liftIO $ asyncShutdown >>= wait
 monitor :: Milliseconds -> Milliseconds -> Host -> Client ()
 monitor initial maxDelay h = do
     liftIO $ threadDelay (toMicros initial)
-    info $ msg (val "monitoring: " +++ h)
+    logInfo' $ "Monitoring: " <> string8 (show h)
     hostCheck 0
   where
     hostCheck :: Int -> Client ()
@@ -509,9 +507,9 @@ monitor initial maxDelay h = do
             if isUp then do
                 sig <- view (context.sigMonit)
                 liftIO $ sig $$ (HostUp (h^.hostAddr))
-                info $ msg (val "reachable: " +++ h)
+                logInfo' $ "Reachable: " <> string8 (show h)
             else do
-                info $ msg (val "unreachable: " +++ h)
+                logInfo' $ "Unreachable: " <> string8 (show h)
                 liftIO $ threadDelay (2^n * minDelay)
                 hostCheck (min (n + 1) maxExp)
 
@@ -593,7 +591,7 @@ setupControl c = do
     atomically' $ writeTVar m h
     liftIO $ setup pol (Map.keys up) (Map.keys down)
     C.register c C.allEventTypes (runClient env . onCqlEvent)
-    info $ msg (val "known hosts: " +++ show (Map.keys h))
+    logInfo' $ "Known hosts: " <> string8 (show (Map.keys h))
     j <- view jobs
     for_ (Map.keys down) $ \d ->
         runJob j (d^.hostAddr) $
@@ -601,7 +599,7 @@ setupControl c = do
     ctl <- view control
     let c' = set C.host l c
     atomically' $ writeTVar ctl (Control Connected c')
-    info $ msg (val "new control connection: " +++ c')
+    logInfo' $ "New control connection: " <> string8 (show c')
 
 -- | Initialise connection pools for the given hosts, checking for
 -- acceptability with the host policy and separating them by reachability.
@@ -651,7 +649,7 @@ checkControl = do
 replaceControl :: Client ()
 replaceControl = do
     e <- ask
-    let l = e^.context.logger
+    let l = e^.context.settings.logger
     liftIO $ mask $ \restore -> do
         cc <- setReconnecting e
         for_ cc $ \c -> forkIO $
@@ -659,8 +657,7 @@ replaceControl = do
                 ignore (C.close c)
                 reconnect e l
               `catchAll` \ex -> do
-                Logger.fatal l $ msg $
-                    val "Control connection reconnect aborted: " +++ show ex
+                logError l $ "Control connection reconnect aborted: " <> string8 (show ex)
                 atomically $ modifyTVar' (e^.control) (set state Disconnected)
   where
     setReconnecting e = atomically $ do
@@ -679,10 +676,10 @@ replaceControl = do
                 `catch` \x -> case fromException x of
                     Just (SomeAsyncException _) -> throwM x
                     Nothing                     -> do
-                        Logger.err l $ msg $ val "All known hosts unreachable."
+                        logError l "All known hosts unreachable."
                         runClient e rebootControl
             Nothing -> do
-                Logger.err l $ msg $ val "No known hosts."
+                logError l "No known hosts."
                 runClient e rebootControl
 
     adInf = capDelay 5000000 (exponentialBackoff 5000)
@@ -690,10 +687,9 @@ replaceControl = do
     onExc l =
         [ const $ Handler $ \(_ :: SomeAsyncException) -> return False
         , const $ Handler $ \(e :: SomeException)      -> do
-            Logger.err l $ msg $ val
-                "Replacement of control connection failed with: "
-                +++ show e +++
-                val ". Retrying ..."
+            logError l $ "Replacement of control connection failed with: "
+                <> string8 (show e)
+                <> ". Retrying ..."
             return True
         ]
 
@@ -701,11 +697,11 @@ replaceControl = do
 -- as the new control connection.
 renewControl :: Host -> Client ()
 renewControl h = do
-    info $ msg (val "Renewing control connection with known host ...")
     ctx <- view context
+    logInfo' "Renewing control connection with known host ..."
     let s = ctx^.settings
     bracketOnError
-        (C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) (ctx^.logger) h)
+        (C.connect (s^.connSettings) (ctx^.timeouts) (s^.protoVersion) (s^.logger) h)
         (liftIO . C.close)
         setupControl
 
@@ -714,7 +710,7 @@ renewControl h = do
 rebootControl :: Client ()
 rebootControl = do
     e <- ask
-    info $ msg $ val "Renewing control connection with initial contacts ..."
+    logInfo' "Renewing control connection with initial contacts ..."
     bracketOnError
         (liftIO (mkContact (e^.context)))
         (liftIO . C.close)
@@ -725,7 +721,7 @@ rebootControl = do
 
 onCqlEvent :: Event -> Client ()
 onCqlEvent x = do
-    info $ "client.event" .= show x
+    logInfo' $ "Event: " <> string8 (show x)
     pol <- view policy
     prt <- view (context.settings.portnumber)
     case x of
@@ -789,3 +785,22 @@ atomically' = liftIO . atomically
 
 readTVarIO' :: TVar a -> Client a
 readTVarIO' = liftIO . readTVarIO
+
+logInfo' :: Builder -> Client ()
+logInfo' m = do
+    l <- view (context.settings.logger)
+    liftIO $ logInfo l m
+{-# INLINE logInfo' #-}
+
+logWarn' :: Builder -> Client ()
+logWarn' m = do
+    l <- view (context.settings.logger)
+    liftIO $ logWarn l m
+{-# INLINE logWarn' #-}
+
+logError' :: Builder -> Client ()
+logError' m = do
+    l <- view (context.settings.logger)
+    liftIO $ logError l m
+{-# INLINE logError' #-}
+

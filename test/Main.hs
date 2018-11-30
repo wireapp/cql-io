@@ -22,8 +22,7 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Text.RawString.QQ
 
-import qualified Data.Set      as Set
-import qualified System.Logger as Log
+import qualified Data.Set as Set
 
 -----------------------------------------------------------------------------
 -- Test Setup
@@ -33,11 +32,10 @@ type TestHost = String
 main :: IO ()
 main = do
     h <- fromMaybe "localhost" <$> lookupEnv "CASSANDRA_HOST"
-    g <- Log.new (Log.setLogLevel Log.Warn Log.defSettings)
-    initSchema g h
+    initSchema h
     defaultMain . testGroup "cql-io" =<<
         forM versions (\v -> do
-            c <- Client.init g (settings h v)
+            c <- Client.init (settings h v)
             return $ testGroup (show v) (tests c))
 
 versions :: [Version]
@@ -46,11 +44,12 @@ versions = [V3, V4]
 settings :: TestHost -> Version -> Settings
 settings h v = setContacts h []
              . setProtocolVersion v
+             . setLogger (stdoutLogger LogInfo)
              $ defSettings
 
-initSchema :: Log.Logger -> TestHost -> IO ()
-initSchema g h = do
-    c <- Client.init g (settings h V4)
+initSchema :: TestHost -> IO ()
+initSchema h = do
+    c <- Client.init (settings h V4)
     runClient c $ do
         dropKeyspace
         createKeyspace

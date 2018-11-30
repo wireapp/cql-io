@@ -22,6 +22,7 @@ import Database.CQL.IO.Cluster.Policies (Policy, random)
 import Database.CQL.IO.Connection.Socket (PortNumber)
 import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.Exception
+import Database.CQL.IO.Log
 import Database.CQL.IO.Pool as P
 import Database.CQL.IO.Timeouts (Milliseconds (..))
 import OpenSSL.Session (SSLContext, SomeSSLException)
@@ -32,6 +33,7 @@ data Settings = Settings
     { _poolSettings  :: PoolSettings
     , _connSettings  :: ConnectionSettings
     , _retrySettings :: RetrySettings
+    , _logger        :: Logger
     , _protoVersion  :: Version
     , _portnumber    :: PortNumber
     , _contacts      :: NonEmpty String
@@ -105,6 +107,7 @@ defSettings = Settings
     P.defSettings
     C.defSettings
     defRetrySettings
+    nullLogger
     V3
     9042
     ("localhost" :| [])
@@ -138,6 +141,10 @@ setPolicy v = set policyMaker v
 -- | Set strategy to use for preparing statements.
 setPrepareStrategy :: PrepareStrategy -> Settings -> Settings
 setPrepareStrategy v = set prepStrategy v
+
+-- | Set the 'Logger' to use for processing log messages emitted by the client.
+setLogger :: Logger -> Settings -> Settings
+setLogger v = set logger v
 
 -----------------------------------------------------------------------------
 -- Pool Settings

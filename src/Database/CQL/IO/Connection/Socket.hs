@@ -37,7 +37,6 @@ import Network.Socket (HostName, PortNumber, SockAddr (..), ShutdownCmd (..))
 import Network.Socket (Family (..), AddrInfo (..), AddrInfoFlag (..))
 import Network.Socket.ByteString.Lazy (sendAll)
 import OpenSSL.Session (SSL, SSLContext)
-import System.Logger (ToBytes (..))
 import System.Timeout
 import Prelude
 
@@ -49,8 +48,8 @@ import qualified OpenSSL.Session            as SSL
 
 data Socket = Stream !S.Socket | Tls !S.Socket !SSL
 
-instance ToBytes Socket where
-    bytes s = bytes $ case s of
+instance Show Socket where
+    show s = show $ case s of
         Stream x -> fd x
         Tls  x _ -> fd x
       where

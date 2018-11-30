@@ -1,5 +1,5 @@
 name:                 cql-io
-version:              1.0.1
+version:              1.1.0
 synopsis:             Cassandra CQL client.
 license:              MPL-2.0
 license-file:         LICENSE
@@ -54,6 +54,7 @@ library
 
     exposed-modules:
         Database.CQL.IO
+        Database.CQL.IO.Hexdump
 
     other-modules:
         Database.CQL.IO.Batch
@@ -65,7 +66,7 @@ library
         Database.CQL.IO.Connection.Socket
         Database.CQL.IO.Connection.Settings
         Database.CQL.IO.Exception
-        Database.CQL.IO.Hexdump
+        Database.CQL.IO.Log
         Database.CQL.IO.Pool
         Database.CQL.IO.PrepQuery
         Database.CQL.IO.Protocol
@@ -97,7 +98,6 @@ library
         , semigroups         >= 0.15
         , stm                >= 2.4
         , text               >= 0.11
-        , tinylog            >= 0.8
         , time               >= 1.4
         , transformers       >= 0.3
         , unliftio-core      >= 0.1.1
@@ -124,7 +124,6 @@ test-suite cql-io-tests
         , text
         , raw-strings-qq
         , time
-        , tinylog
         , uuid
 
 library cql-io-internal

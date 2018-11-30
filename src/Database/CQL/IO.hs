@@ -53,6 +53,13 @@ module Database.CQL.IO
     , setMaxRecvBuffer
     , setSSLContext
 
+      -- ** Logging
+    , Logger (..)
+    , LogLevel (..)
+    , setLogger
+    , nullLogger
+    , stdoutLogger
+
       -- ** Authentication
     , setAuthentication
     , Authenticator (..)
@@ -176,6 +183,7 @@ import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
 import Database.CQL.IO.Connection.Settings as C
 import Database.CQL.IO.Exception
+import Database.CQL.IO.Log
 import Database.CQL.IO.PrepQuery
 import Database.CQL.IO.Settings as S
 import Prelude hiding (init)

@@ -45,7 +45,7 @@ import Control.Lens ((^.), makeLenses, view, set)
 import Control.Monad
 import Control.Monad.Catch
 import Control.Monad.IO.Class
-import Data.ByteString.Lazy (ByteString)
+import Data.ByteString.Builder
 import Data.Foldable (for_)
 import Data.Semigroup ((<>))
 import Data.Text.Lazy (fromStrict)
@@ -56,22 +56,17 @@ import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Connection.Socket (Socket)
 import Database.CQL.IO.Connection.Settings
 import Database.CQL.IO.Exception
-import Database.CQL.IO.Hexdump
+import Database.CQL.IO.Log
 import Database.CQL.IO.Protocol
 import Database.CQL.IO.Signal (Signal, signal, (|->), emit)
 import Database.CQL.IO.Sync (Sync)
 import Database.CQL.IO.Timeouts (TimeoutManager, withTimeout)
-import System.IO (nativeNewline, Newline (..))
-import System.Logger (Logger, (+++), (.=), (~~), trace, warn, msg, val)
 
-import qualified Data.ByteString.Lazy              as L
-import qualified Data.ByteString.Lazy.Char8        as Char8
 import qualified Data.HashMap.Strict               as HashMap
 import qualified Data.Vector                       as Vector
 import qualified Database.CQL.IO.Connection.Socket as Socket
 import qualified Database.CQL.IO.Sync              as Sync
 import qualified Database.CQL.IO.Tickets           as Tickets
-import qualified System.Logger                     as Log
 
 -- | The streams of a connection are a vector of slots, each
 -- containing the last received CQL protocol frame on that stream.
@@ -100,10 +95,7 @@ instance Eq Connection where
     a == b = a^.ident == b^.ident
 
 instance Show Connection where
-    show = Char8.unpack . Log.eval . Log.bytes
-
-instance Log.ToBytes Connection where
-    bytes c = Log.bytes (c^.host) +++ val "#" +++ c^.sock
+    show c = shows (c^.host) . showString "#" . shows (c^.sock) $ ""
 
 ------------------------------------------------------------------------------
 -- Lifecycle
@@ -174,10 +166,7 @@ request c rq = send >>= receive
     send = withTimeout (c^.tmanager) (c^.settings.sendTimeout) (close c) $ do
         i <- Tickets.toInt <$> Tickets.get (c^.tickets)
         req <- serialise (c^.protocol) (c^.settings.compression) rq i
-        trace (c^.logger) $ msg c
-            ~~ "stream" .= i
-            ~~ "type"   .= val "request"
-            ~~ msg' (hexdump (L.take 160 req))
+        logRequest (c^.logger) req
         withMVar (c^.wLock) $ const $ do
             isOpen <- readTVarIO (c^.status)
             if isOpen then
@@ -213,8 +202,8 @@ startup c = liftIO $ do
 
 checkAuth :: Connection -> IO ()
 checkAuth c = unless (null (c^.settings.authenticators)) $
-    warn (_logger c) $ msg $ val
-        "Authentication configured but none required by server."
+    logWarn' (c^.logger) (c^.host) $
+        "Authentication configured but none required by the server."
 
 authenticate :: Connection -> Authenticate -> IO ()
 authenticate c (Authenticate (AuthMechanism -> m)) =
@@ -348,7 +337,7 @@ readLoop v g cset tck h sck syn sig sref wlck =
 
     logException e = case fromException e of
         Just AsyncCancelled -> return ()
-        _                   -> warn g $ msg h ~~ msg (val "read-loop: " +++ show e)
+        _                   -> logWarn' g h ("read-loop: " <> string8 (show e))
 
 readFrame :: Version -> Logger -> Host -> Socket -> Int -> IO Frame
 readFrame v g h s n = do
@@ -360,10 +349,7 @@ readFrame v g h s n = do
            RsHeader -> do
                let len = lengthRepr (bodyLength hdr)
                dat <- Socket.recv n (h^.hostAddr) s (fromIntegral len)
-               trace g $ msg (h +++ val "#" +++ s)
-                   ~~ "stream" .= fromStreamId (streamId hdr)
-                   ~~ "type"   .= val "response"
-                   ~~ msg' (hexdump $ L.take 160 (b <> dat))
+               logResponse g (b <> dat)
                return $ Frame hdr dat
 
 unhandled :: Connection -> Response k a b -> IO c
@@ -374,7 +360,6 @@ unhandled c r = case r of
 unexpected :: Connection -> Response k a b -> IO c
 unexpected c r = throwM $ UnexpectedResponse (c^.host) r
 
-msg' :: ByteString -> Log.Msg -> Log.Msg
-msg' x = Log.msg $ case nativeNewline of
-    LF   -> Log.val "\n"   +++ x
-    CRLF -> Log.val "\r\n" +++ x
+logWarn' :: Logger -> Host -> Builder -> IO ()
+logWarn' l h m = logWarn l $ string8 (show h) <> string8 ": " <> m
+
