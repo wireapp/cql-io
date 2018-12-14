@@ -54,9 +54,21 @@ library
 
     exposed-modules:
         Database.CQL.IO
+
+    reexported-modules:
         Database.CQL.IO.Hexdump
 
-    other-modules:
+    build-depends:
+          base
+        , cql-io-internal
+        , cql
+
+library cql-io-internal
+    default-language: Haskell2010
+    hs-source-dirs: isrc
+    ghc-options: -Wall -O2 -fwarn-tabs
+
+    exposed-modules:
         Database.CQL.IO.Batch
         Database.CQL.IO.Client
         Database.CQL.IO.Cluster.Discovery
@@ -66,6 +78,8 @@ library
         Database.CQL.IO.Connection.Socket
         Database.CQL.IO.Connection.Settings
         Database.CQL.IO.Exception
+        Database.CQL.IO.Hexdump
+        Database.CQL.IO.Jobs
         Database.CQL.IO.Log
         Database.CQL.IO.Pool
         Database.CQL.IO.PrepQuery
@@ -83,7 +97,6 @@ library
         , bytestring         >= 0.10
         , containers         >= 0.5
         , cql                >= 4.0
-        , cql-io-internal
         , cryptonite         >= 0.13
         , data-default-class
         , exceptions         >= 0.4
@@ -113,49 +126,23 @@ test-suite cql-io-tests
     ghc-options:        -threaded -Wall -O2 -fwarn-tabs
     build-depends:
           base
+        , async
         , containers
         , cql
         , cql-io
+        , cql-io-internal
         , Decimal
         , iproute
         , mtl
         , tasty          >= 0.11
         , tasty-hunit    >= 0.9
         , text
+        , primes
         , raw-strings-qq
         , time
         , uuid
 
-library cql-io-internal
-    default-language: Haskell2010
-    hs-source-dirs: isrc
-    ghc-options: -Wall -O2 -fwarn-tabs
-
-    exposed-modules:
-        Database.CQL.IO.Jobs
-
-    build-depends:
-          async
-        , base
-        , containers
-        , exceptions
-
-test-suite cql-io-internal-tests
-    type: exitcode-stdio-1.0
-    default-language: Haskell2010
-    main-is: Main.hs
-    hs-source-dirs: itest
-    ghc-options: -threaded -Wall -fwarn-tabs
-
-    build-depends:
-          base
-        , async
-        , containers
-        , cql
-        , cql-io-internal
-        , tasty          >= 0.11
-        , tasty-hunit    >= 0.9
-        , primes
-
     other-modules:
-        Test.Jobs
+        Test.Database.CQL.IO
+        Test.Database.CQL.IO.Jobs
+
