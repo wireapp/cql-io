@@ -10,18 +10,24 @@
 
 module Database.CQL.IO.Connection.Settings
     ( ConnectionSettings
+    , ConnId (..)
     , defSettings
+    , defKeyspace
+    , compression
+    , tlsContext
+
+    -- * Timeouts
+    , Milliseconds (..)
     , connectTimeout
     , sendTimeout
     , responseTimeout
-    , maxStreams
-    , compression
-    , defKeyspace
-    , maxRecvBuffer
-    , tlsContext
-    , authenticators
 
-      -- * Authentication
+    -- * Limits
+    , maxStreams
+    , maxRecvBuffer
+
+    -- * Authentication
+    , authenticators
     , AuthMechanism (..)
     , Authenticator (..)
     , AuthContext   (..)
@@ -33,19 +39,27 @@ module Database.CQL.IO.Connection.Settings
     ) where
 
 import Control.Lens (makeLenses)
-import Control.Monad
+import Data.Hashable
 import Data.HashMap.Strict (HashMap)
-import Data.Int
+import Data.String
+import Data.Text (Text)
+import Data.Unique
 import Database.CQL.Protocol
 import Database.CQL.IO.Cluster.Host
-import Database.CQL.IO.Types
 import OpenSSL.Session (SSLContext)
-import Prelude
 
 import qualified Data.ByteString.Lazy.Char8 as Char8
 import qualified Data.HashMap.Strict        as HashMap
 import qualified Data.Text.Lazy             as Lazy
 import qualified Data.Text.Lazy.Encoding    as Lazy
+
+newtype Milliseconds = Ms { ms :: Int }
+    deriving (Eq, Show)
+
+newtype ConnId = ConnId Unique deriving (Eq, Ord)
+
+instance Hashable ConnId where
+    hashWithSalt _ (ConnId u) = hashUnique u
 
 data ConnectionSettings = ConnectionSettings
     { _connectTimeout  :: !Milliseconds
@@ -66,6 +80,14 @@ data AuthContext = AuthContext
     { _authConnId :: !ConnId
     , _authHost   :: !InetAddr
     }
+
+-- | The (unique) name of a SASL authentication mechanism.
+--
+-- In the case of Cassandra, this is currently always the fully-qualified
+-- Java class name of the configured server-side @IAuthenticator@
+-- implementation.
+newtype AuthMechanism = AuthMechanism Text
+    deriving (Eq, Ord, Show, IsString, Hashable)
 
 -- | A client authentication handler.
 --
@@ -129,9 +151,9 @@ passwordAuthenticator (AuthUser u) (AuthPass p) = Authenticator
 
 defSettings :: ConnectionSettings
 defSettings =
-    ConnectionSettings 5000          -- connect timeout
-                       3000          -- send timeout
-                       10000         -- response timeout
+    ConnectionSettings (Ms 5000)     -- connect timeout
+                       (Ms 3000)     -- send timeout
+                       (Ms 10000)    -- response timeout
                        128           -- max streams per connection
                        noCompression -- compression
                        Nothing       -- keyspace

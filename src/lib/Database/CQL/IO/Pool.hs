@@ -22,7 +22,6 @@ module Database.CQL.IO.Pool
     , poolStripes
     ) where
 
-import Control.Applicative
 import Control.AutoUpdate
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -30,18 +29,18 @@ import Control.Concurrent.STM
 import Control.Exception
 import Control.Lens ((^.), makeLenses, view)
 import Control.Monad.IO.Class
-import Control.Monad hiding (forM_, mapM_)
+import Control.Monad
 import Data.Foldable (forM_, mapM_, find)
 import Data.Function (on)
 import Data.Hashable
 import Data.IORef
-import Prelude hiding (mapM_)
 import Data.Sequence (Seq, ViewL (..), (|>), (><))
+import Data.Semigroup ((<>))
 import Data.Time.Clock (UTCTime, NominalDiffTime, getCurrentTime, diffUTCTime)
 import Data.Vector (Vector, (!))
 import Database.CQL.IO.Connection (Connection)
-import Database.CQL.IO.Types (Timeout, ignore)
-import System.Logger hiding (create, defSettings, settings)
+import Database.CQL.IO.Exception (ConnectionError (..), ignore)
+import Database.CQL.IO.Log
 
 import qualified Data.Sequence as Seq
 import qualified Data.Vector   as Vec
@@ -114,28 +113,30 @@ with p f = liftIO $ do
         r <- take1 p s
         case r of
             Just  v -> do
-                x <- restore (f (value v)) `catches` handlers p s v
+                x <- restore (f (value v)) `catch` cleanup p s v
                 put p s v id
                 return (Just x)
             Nothing -> return Nothing
 
 purge :: Pool -> IO ()
-purge p = Vec.forM_ (p^.stripes) $ \s ->
-    atomically (swapTVar (conns s) Seq.empty) >>= mapM_ (ignore . view destroyFn p . value)
+purge p = Vec.forM_ (p^.stripes) $ \s -> do
+    cs <- atomically (swapTVar (conns s) Seq.empty)
+    mapM_ (ignore . view destroyFn p . value) cs
 
 -----------------------------------------------------------------------------
 -- Internal
 
-handlers :: Pool -> Stripe -> Resource -> [Handler a]
-handlers p s r =
-    [ Handler $ \(x :: Timeout)       -> onTimeout      >> throwIO x
-    , Handler $ \(x :: SomeException) -> destroyR p s r >> throwIO x
-    ]
+cleanup :: Pool -> Stripe -> Resource -> SomeException -> IO a
+cleanup p s r x = do
+    case fromException x of
+        Just (ResponseTimeout {}) -> onTimeout
+        _                         -> destroyR p s r
+    throwIO x
   where
     onTimeout =
         if timeouts r > p^.settings.maxTimeouts
             then do
-                info (p^.logger) $ msg (show (value r) +++ val " has too many timeouts.")
+                logInfo (p^.logger) $ string8 (show (value r)) <> ": Too many timeouts."
                 destroyR p s r
             else put p s r incrTimeouts
 
@@ -205,7 +206,7 @@ reaper p = forever $ do
                     modifyTVar' (inUse s) (subtract (Seq.length stale))
                 return stale
         forM_ x $ \v -> ignore $ do
-            trace (p^.logger) $ "reap" .= show (value v)
+            logDebug (p^.logger) $ "Reaping idle connection: " <> string8 (show (value v))
             p^.destroyFn $ (value v)
 
 stripe :: Pool -> IO Stripe

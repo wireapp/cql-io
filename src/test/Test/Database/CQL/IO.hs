@@ -2,7 +2,7 @@
 {-# LANGUAGE QuasiQuotes       #-}
 {-# LANGUAGE TypeFamilies      #-}
 
-module Main (main) where
+module Test.Database.CQL.IO (tests) where
 
 import Control.Monad
 import Control.Monad.Identity
@@ -22,23 +22,21 @@ import Test.Tasty
 import Test.Tasty.HUnit
 import Text.RawString.QQ
 
-import qualified Data.Set      as Set
-import qualified System.Logger as Log
+import qualified Data.Set as Set
 
 -----------------------------------------------------------------------------
 -- Test Setup
 
 type TestHost = String
 
-main :: IO ()
-main = do
+tests :: IO TestTree
+tests = do
     h <- fromMaybe "localhost" <$> lookupEnv "CASSANDRA_HOST"
-    g <- Log.new (Log.setLogLevel Log.Warn Log.defSettings)
-    initSchema g h
-    defaultMain . testGroup "cql-io" =<<
+    initSchema h
+    fmap (testGroup "Database.CQL.IO") $
         forM versions (\v -> do
-            c <- Client.init g (settings h v)
-            return $ testGroup (show v) (tests c))
+            c <- Client.init (settings h v)
+            return $ testGroup (show v) (cqlTests c))
 
 versions :: [Version]
 versions = [V3, V4]
@@ -46,11 +44,12 @@ versions = [V3, V4]
 settings :: TestHost -> Version -> Settings
 settings h v = setContacts h []
              . setProtocolVersion v
+             . setLogger (stdoutLogger LogInfo)
              $ defSettings
 
-initSchema :: Log.Logger -> TestHost -> IO ()
-initSchema g h = do
-    c <- Client.init g (settings h V4)
+initSchema :: TestHost -> IO ()
+initSchema h = do
+    c <- Client.init (settings h V4)
     runClient c $ do
         dropKeyspace
         createKeyspace
@@ -167,8 +166,8 @@ truncateTables = forM_ [cql1, cql2, cql3] $ \q ->
 -----------------------------------------------------------------------------
 -- Tests
 
-tests :: ClientState -> [TestTree]
-tests c =
+cqlTests :: ClientState -> [TestTree]
+cqlTests c =
     [ test c "write-read" testWriteRead
     , test c "write-read-ttl" testWriteReadTtl
     , test c "trans" testTrans
@@ -236,8 +235,10 @@ testWriteRead = do
 testWriteReadTtl :: Client ()
 testWriteReadTtl = do
     write ins (params (1000, True))
-    (True, Just ttl) <- fromJust <$> query1 get (params (Identity 1000))
-    liftIO $ assertBool "TTL > 0" (ttl > 0)
+    (d, ttl) <- fromJust <$> query1 get (params (Identity 1000))
+    liftIO $ do
+        assertBool "d == False" d
+        assertBool "TTL > 0" (ttl > Just 0)
   where
     ins :: PrepQuery W (Int64, Bool) ()
     ins = "insert into cqltest.test1 (a,d) values (?,?) using ttl 3600"
@@ -248,11 +249,11 @@ testWriteReadTtl = do
 testTrans :: Client ()
 testTrans = do
     -- 1st insert (success)
-    [_row] <- trans ins (params (1, "ascii-1"))
+    _row <- head <$> trans ins (params (1, "ascii-1"))
     assertApplied _row
 
     -- 2nd insert (conflict)
-    [_row] <- trans ins (params (1, "ascii-1"))
+    _row <- head <$> trans ins (params (1, "ascii-1"))
     liftIO $ do
         rowLength _row @?= 15 -- [applied] + full existing row
         fromRow 0 _row @?= Right (Just False)             -- [applied]
@@ -263,11 +264,11 @@ testTrans = do
         map (($ _row) . fromRow) [3..14] @?= replicate 12 (Right vnull)
 
     -- 1st update (success)
-    [_row] <- trans upd (params ("ascii-2", 1, "ascii-1"))
+    _row <- head <$> trans upd (params ("ascii-2", 1, "ascii-1"))
     assertApplied _row
 
     -- 2nd update (conflict)
-    [_row] <- trans upd (params ("ascii-2", 1, "ascii-1"))
+    _row <- head <$> trans upd (params ("ascii-2", 1, "ascii-1"))
     liftIO $ do
         rowLength _row @?= 2 -- [applied] + conflicting value
         fromRow 0 _row @?= Right (Just False)             -- [applied]

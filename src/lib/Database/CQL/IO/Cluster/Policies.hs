@@ -28,9 +28,8 @@ data Policy = Policy
     { setup :: [Host] -> [Host] -> IO ()
       -- ^ Initialise the policy with two sets of hosts. The first
       -- parameter are hosts known to be available, the second are other
-      -- nodes.
-      -- Please note that a policy may be re-initialised at any point
-      -- through this method.
+      -- nodes. Note that a policy may be re-initialised at any point
+      -- through this function.
     , onEvent :: HostEvent -> IO ()
       -- ^ Event handler. Policies will be informed about cluster changes
       -- through this function.
@@ -45,7 +44,7 @@ data Policy = Policy
       -- policy if a dicovered host should be ignored.
     , hostCount :: IO Word
       -- ^ During query processing, the driver will ask the policy for
-      -- a rough esitimate of alive hosts. The number is used to repeatedly
+      -- a rough estimate of alive hosts. The number is used to repeatedly
       -- invoke 'select' (with the underlying assumption that the policy
       -- returns mostly different hosts).
     , display :: IO String

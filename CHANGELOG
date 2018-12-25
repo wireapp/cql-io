@@ -1,3 +1,14 @@
+1.1.0
+-----
+- Improve configuration of retry settings and refactor exceptions
+  (https://gitlab.com/twittner/cql-io/issues/13).
+- Document and export the 'getResult' function alongside the low-level
+  query API.
+- Replace monad-control with unliftio.
+- Remove dependency on tinylog, introducing a minimal logging interface that can
+  be hooked up to any logging library. Tinylog integration has moved to
+  the new cql-io-tinylog library.
+
 1.0.1.1
 -------
 - Add more documentation on queries.

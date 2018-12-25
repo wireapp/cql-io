@@ -53,6 +53,13 @@ module Database.CQL.IO
     , setMaxRecvBuffer
     , setSSLContext
 
+      -- ** Logging
+    , Logger (..)
+    , LogLevel (..)
+    , setLogger
+    , nullLogger
+    , stdoutLogger
+
       -- ** Authentication
     , setAuthentication
     , Authenticator (..)
@@ -68,12 +75,18 @@ module Database.CQL.IO
       -- ** Retry Settings
     , RetrySettings
     , noRetry
-    , retryForever
-    , maxRetries
+      -- *** Default
+    , defRetrySettings
+    , defRetryPolicy
+    , defRetryHandlers
+      -- *** Eager
+    , eagerRetrySettings
+    , eagerRetryPolicy
+    , eagerRetryHandlers
+      -- *** Configuration
+    , setRetryPolicy
+    , setRetryHandlers
     , adjustConsistency
-    , constDelay
-    , expBackoff
-    , fibBackoff
     , adjustSendTimeout
     , adjustResponseTimeout
 
@@ -147,21 +160,20 @@ module Database.CQL.IO
       -- ** Low-Level Queries
       -- $low-level-queries
     , RunQ (..)
+    , HostResponse (..)
     , request
+    , getResult
 
       -- * Exceptions
-    , InvalidSettings     (..)
-    , InternalError       (..)
+    , ProtocolError       (..)
     , HostError           (..)
     , ConnectionError     (..)
-    , UnexpectedResponse  (..)
-    , Timeout             (..)
-    , HashCollision       (..)
+    , ResponseError       (..)
     , AuthenticationError (..)
+    , HashCollision       (..)
     ) where
 
 import Control.Applicative
-import Control.Monad.Catch
 import Data.Functor.Identity
 import Data.Maybe (isJust, listToMaybe)
 import Database.CQL.Protocol
@@ -170,9 +182,10 @@ import Database.CQL.IO.Client
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Cluster.Policies
 import Database.CQL.IO.Connection.Settings as C
+import Database.CQL.IO.Exception
+import Database.CQL.IO.Log
 import Database.CQL.IO.PrepQuery
 import Database.CQL.IO.Settings as S
-import Database.CQL.IO.Types
 import Prelude hiding (init)
 
 import qualified Database.CQL.IO.Batch as B
@@ -240,7 +253,7 @@ class RunQ q where
     runQ :: (MonadClient m, Tuple a, Tuple b)
          => q k a b
          -> QueryParams a
-         -> m (Response k a b)
+         -> m (HostResponse k a b)
 
 instance RunQ QueryString where
     runQ q p = request (RqQuery (Query q p))
@@ -248,27 +261,13 @@ instance RunQ QueryString where
 instance RunQ PrepQuery where
     runQ q = liftClient . execute q
 
--- | Construct default 'QueryParams' for the given consistency
--- and bound values. In particular, no page size, paging state
--- or serial consistency will be set.
-defQueryParams :: Consistency -> a -> QueryParams a
-defQueryParams c a = QueryParams
-    { consistency       = c
-    , values            = a
-    , skipMetaData      = False
-    , pageSize          = Nothing
-    , queryPagingState  = Nothing
-    , serialConsistency = Nothing
-    , enableTracing     = Nothing
-    }
-
 -- | Run a CQL read-only query returning a list of results.
 query :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m [b]
 query q p = do
     r <- runQ q p
     getResult r >>= \case
         RowsResult _ b -> return b
-        _              -> throwM $ UnexpectedResponse r
+        _              -> unexpected r
 
 -- | Run a CQL read-only query returning a single result.
 query1 :: (MonadClient m, Tuple a, Tuple b, RunQ q) => q R a b -> QueryParams a -> m (Maybe b)
@@ -284,7 +283,7 @@ write q p = do
     r <- runQ q p
     getResult r >>= \case
         VoidResult -> return ()
-        _          -> throwM $ UnexpectedResponse r
+        _          -> unexpected r
 
 -- | Run a CQL conditional write query (e.g. insert\/update\/delete) as a
 -- "lightweight transaction", returning the result 'Row's describing the
@@ -294,7 +293,7 @@ trans q p = do
     r <- runQ q p
     getResult r >>= \case
         RowsResult _ b -> return b
-        _              -> throwM $ UnexpectedResponse r
+        _              -> unexpected r
 
 -- | Run a CQL schema query, returning 'SchemaChange' information, if any.
 schema :: (MonadClient m, Tuple a, RunQ q) => q S a () -> QueryParams a -> m (Maybe SchemaChange)
@@ -303,7 +302,7 @@ schema q p = do
     getResult r >>= \case
         SchemaChangeResult s -> return $ Just s
         VoidResult           -> return Nothing
-        _                    -> throwM $ UnexpectedResponse r
+        _                    -> unexpected r
 
 -- | Run a batch query against a Cassandra node.
 batch :: MonadClient m => BatchM () -> m ()
@@ -341,5 +340,5 @@ paginate q p = do
                 return $ Page True b (paginate q p' { queryPagingState = pagingState m })
             else
                 return $ Page False b (return emptyPage)
-        _ -> throwM $ UnexpectedResponse r
+        _ -> unexpected r
 

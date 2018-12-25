@@ -18,14 +18,12 @@ module Database.CQL.IO.Batch
 
 import Control.Applicative
 import Control.Concurrent.STM (atomically)
-import Control.Monad.Catch
 import Control.Monad.IO.Class
 import Control.Monad.Trans
 import Control.Monad.Trans.State.Strict
 import Database.CQL.IO.Client
-import Database.CQL.IO.Cluster.Host
+import Database.CQL.IO.Connection (Raw)
 import Database.CQL.IO.PrepQuery
-import Database.CQL.IO.Types
 import Database.CQL.Protocol
 import Prelude
 
@@ -39,9 +37,9 @@ batch :: BatchM a -> Client ()
 batch m = do
     b <- execStateT (unBatchM m) (Batch BatchLogged [] Quorum Nothing)
     r <- executeWithPrepare Nothing (RqBatch b :: Raw Request)
-    getResult (hrResponse r) >>= \case
+    getResult r >>= \case
         VoidResult -> return ()
-        _          -> throwM $ UnexpectedResponse (hrResponse r)
+        _          -> unexpected r
 
 -- | Add a query to this batch.
 addQuery :: (Show a, Tuple a, Tuple b) => QueryString W a b -> a -> BatchM ()
