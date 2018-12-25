@@ -1,4 +1,4 @@
-1.1.0 (WIP)
+1.1.0
 -----
 - Improve configuration of retry settings and refactor exceptions
   (https://gitlab.com/twittner/cql-io/issues/13).
