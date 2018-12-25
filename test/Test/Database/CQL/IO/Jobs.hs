@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RankNTypes        #-}
 
-module Test.Jobs (tests) where
+module Test.Database.CQL.IO.Jobs (tests) where
 
 import Control.Concurrent
 import Control.Concurrent.Async
@@ -15,8 +15,8 @@ import Test.Tasty.HUnit
 
 import Database.CQL.IO.Jobs
 
-tests :: [TestTree]
-tests =
+tests :: TestTree
+tests = testGroup "Database.CQL.IO.Jobs"
     [ testCase "run-sequential"     testRunJobSequential
     , testCase "run-concurrent"     testRunJobConcurrent
     , testCase "try-run-sequential" testTryRunJobSequential
