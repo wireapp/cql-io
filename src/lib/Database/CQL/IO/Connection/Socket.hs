@@ -32,7 +32,6 @@ import Data.Monoid
 import Database.CQL.IO.Cluster.Host
 import Database.CQL.IO.Exception (ConnectionError (..))
 import Database.CQL.IO.Timeouts (Milliseconds (..))
-import Foreign.C.Types (CInt (..))
 import Network.Socket (HostName, PortNumber, SockAddr (..), ShutdownCmd (..))
 import Network.Socket (Family (..), AddrInfo (..), AddrInfoFlag (..))
 import Network.Socket.ByteString.Lazy (sendAll)
@@ -49,11 +48,8 @@ import qualified OpenSSL.Session            as SSL
 data Socket = Stream !S.Socket | Tls !S.Socket !SSL
 
 instance Show Socket where
-    show s = show $ case s of
-        Stream x -> fd x
-        Tls  x _ -> fd x
-      where
-        fd x = let CInt n = S.fdSocket x in n
+    show (Stream s) = show s
+    show (Tls  s _) = show s
 
 resolve :: HostName -> PortNumber -> IO [InetAddr]
 resolve h p = do
