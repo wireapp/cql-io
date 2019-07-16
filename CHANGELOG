@@ -1,3 +1,7 @@
+1.1.1
+-----
+- Compatibility with `network >= 3`.
+
 1.1.0
 -----
 - Improve configuration of retry settings and refactor exceptions

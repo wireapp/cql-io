@@ -7,7 +7,6 @@ cache:
   paths:
     - .cabal-store
     - dist-newstyle/cache
-    - .cabal-sandbox
 
 services:
   - cassandra:3.11.2
