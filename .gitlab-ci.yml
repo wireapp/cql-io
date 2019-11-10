@@ -15,6 +15,12 @@ before_script:
   - apt -qq update
   - cabal update
 
+test:8.8:
+  image: haskell:8.8
+  script:
+    - apt -qq -y install build-essential libssl-dev > /dev/null
+    - cabal --store-dir=$STORE_DIR test
+
 test:8.6:
   image: haskell:8.6
   script:
@@ -29,15 +35,11 @@ test:8.4:
 
 test:8.2:
   image: haskell:8.2
+  before_script:
+    - apt-key adv --keyserver ha.pool.sks-keyservers.net --recv-keys 2EAF8B8BB12873F5
+    - apt -qq update
+    - cabal update
   script:
     - apt -qq -y install build-essential libssl-dev > /dev/null
-    - cabal --store-dir=$STORE_DIR new-test
-
-test:8.0:
-  image: haskell:8.0
-  script:
-    - apt -qq install build-essential netbase xz-utils libstdc++-4.9-dev libssl-dev > /dev/null
-    - cabal install cabal-install-2.0.0.1 && hash -d cabal
-    - cabal update
     - cabal --store-dir=$STORE_DIR new-test
 
