@@ -725,13 +725,15 @@ onCqlEvent x = do
     pol <- view policy
     prt <- view (context.settings.portnumber)
     case x of
-        StatusEvent Down (sock2inet prt -> a) ->
+        StatusEvent Down (sock2inet prt -> a) -> do
             liftIO $ onEvent pol (HostDown a)
+            replaceControlIfNecessary a
         TopologyEvent RemovedNode (sock2inet prt -> a) -> do
             hmap <- view hostmap
             atomically' $
                 modifyTVar' hmap (Map.filterWithKey (\h _ -> h^.hostAddr /= a))
             liftIO $ onEvent pol (HostGone a)
+            replaceControlIfNecessary a
         StatusEvent Up (sock2inet prt -> a) -> do
             s <- ask
             startMonitor s a
@@ -759,6 +761,9 @@ onCqlEvent x = do
                 prepareAllQueries h
             Nothing -> return ()
 
+    replaceControlIfNecessary a = do
+        ctrl <- readTVarIO' =<< view control
+        when (ctrl^.connection.host.hostAddr == a) replaceControl
 -----------------------------------------------------------------------------
 -- Utilities
 
