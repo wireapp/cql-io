@@ -670,7 +670,7 @@ replaceControl = do
                 return Nothing
 
     reconnect e l = recovering adInf (onExc l) $ \_ -> do
-        hosts <- NE.nonEmpty . Map.keys <$> readTVarIO (e^.hostmap)
+        hosts <- NE.nonEmpty <$> current (e^.policy)
         case hosts of
             Just hs -> hs `tryAll` (runClient e . renewControl)
                 `catch` \x -> case fromException x of
